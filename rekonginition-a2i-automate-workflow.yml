@@ -1,0 +1,1353 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: |
+  MLOps for Amazon Rekognition Custom Labels and Augmented AI with AWS Step Functions.
+  This Template MLOps around around Amazon Rekognition Custom Labels and Amazon Augmented AI (A2I) with AWS Step Functions and AWS System Manager Parameter Store backed by AWS Lambda.
+Parameters:
+  SNSEmail:
+    Type: String
+    Description: Enter a valid email address for Amazon SNS
+    AllowedPattern: "^[\\x20-\\x45]?[\\w-\\+]+(\\.[\\w]+)*@[\\w-]+(\\.[\\w]+)*(\\.[a-z]{2,})$"
+    ConstraintDescription: Please enter a valid email address
+  A2IPrivateTeamName:
+    Type: String
+    Default: ''
+    Description: Please enter a Private Team Name or leave blank to create a new one.
+Conditions:
+  CreateWorkTeam: !Equals
+    - !Ref A2IPrivateTeamName
+    - ''
+Resources:
+  S3Bucket:
+    DeletionPolicy: Retain
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: True
+        BlockPublicPolicy: True
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods:
+              - GET
+            AllowedOrigins:
+              - "*"
+  S3BucketPolicy:
+        DeletionPolicy: Retain
+        Type: AWS::S3::BucketPolicy
+        Properties:
+          Bucket: !Ref S3Bucket
+          PolicyDocument: !Sub |
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "${AWS::StackId}",
+                  "Effect": "Allow",
+                  "Principal": {
+                    "Service": "rekognition.amazonaws.com"
+                  },
+                  "Action": [
+                    "s3:GetBucketAcl",
+                    "s3:GetBucketLocation"
+                  ],
+                  "Resource": "${S3Bucket.Arn}"
+                },
+                {
+                  "Sid": "${AWS::StackId}",
+                  "Effect": "Allow",
+                  "Principal": {
+                    "Service": "rekognition.amazonaws.com"
+                  },
+                  "Action": [
+                    "s3:GetObject",
+                    "s3:GetObjectAcl",
+                    "s3:GetObjectVersion",
+                    "s3:GetObjectTagging"
+                  ],
+                  "Resource": "${S3Bucket.Arn}/*"
+                },
+                {
+                  "Sid": "${AWS::StackId}",
+                  "Effect": "Allow",
+                  "Principal": {
+                    "Service": "rekognition.amazonaws.com"
+                  },
+                  "Action": "s3:GetBucketAcl",
+                  "Resource": "${S3Bucket.Arn}"
+                },
+                {
+                  "Sid": "${AWS::StackId}",
+                  "Effect": "Allow",
+                  "Principal": {
+                    "Service": "rekognition.amazonaws.com"
+                  },
+                  "Action": "s3:PutObject",
+                  "Resource": "${S3Bucket.Arn}/*",
+                  "Condition": {
+                    "StringEquals": {
+                      "s3:x-amz-acl": "bucket-owner-full-control"
+                    }
+                  }
+                }
+              ]
+            }
+  SNSTopicRekognition:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        - Endpoint: !Ref SNSEmail
+          Protocol: email
+      TopicName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "sns-topic"]]
+      DisplayName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "sns-topic"]]
+  SNSTopicRekognitionPolicy:
+      Type: AWS::SNS::TopicPolicy
+      Properties:
+        PolicyDocument:
+          Id: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "sns-policy"]]
+          Version: "2012-10-17"
+          Statement:
+            Sid: !Ref AWS::StackId
+            Action: sns:Publish
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Resource: !Ref SNSTopicRekognition
+            Condition:
+              ArnLike:
+                aws:SourceArn: !Join ["/",[!Join [":", ["arn:aws:lambda", !Ref AWS::Region, !Ref AWS::AccountId, "function"]], !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "*"]]]]
+        Topics:
+          - !Ref SNSTopicRekognition
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "LambdaExecutionRole"]]
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "LambdaExecutionPolicy"]]
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action: iam:PassRole
+            Resource: !Join ["/", [!Join [":",["arn:aws:iam:",!Ref AWS::AccountId,"role"]], "*"]]
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: !Join [":", ["arn:aws:logs:*", !Ref AWS::AccountId, "*"]]
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectAcl
+              - s3:GetObjectVersion
+              - s3:GetObjectTagging
+              - s3:PutObject
+            Resource: !Join ["/", [!GetAtt S3Bucket.Arn, "*"]]
+          - Effect: Allow
+            Action:
+              - s3:GetBucketAcl
+              - s3:GetBucketLocation
+              - s3:ListBucket
+              - s3:PutBucketNotification
+            Resource: !GetAtt S3Bucket.Arn
+          - Effect: Allow
+            Action: s3:ListAllMyBuckets
+            Resource: "arn:aws:s3:::*"
+          - Effect: Allow
+            Action: sns:Publish
+            Resource: !Ref SNSTopicRekognition
+          - Effect: Allow
+            Action:
+              - ssm:GetParameter*
+              - ssm:PutParameter
+            Resource: !Join ["/", [!Join [":", ["arn:aws:ssm", !Ref AWS::Region, !Ref AWS::AccountId, "parameter"]], !Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "*"]]
+          - Effect: Allow
+            Action:
+              - events:EnableRule
+              - events:DisableRule
+              - events:PutRule
+            Resource: !Join ["/",[!Join [":", ["arn:aws:events", !Ref AWS::Region, !Ref AWS::AccountId, "rule"]], !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "*"]]]]
+          - Effect: Allow
+            Action: states:StartExecution
+            Resource: !Join [":",[!Join [":", ["arn:aws:states", !Ref AWS::Region, !Ref AWS::AccountId, "stateMachine"]], !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "*"]]]]
+          - Effect: Allow
+            Action:
+              - rekognition:CreateProject*
+              - rekognition:DescribeProjectVersions
+              - rekognition:DetectCustomLabels
+              - rekognition:StartProjectVersion
+              - rekognition:StopProjectVersion
+            Resource: !Join ["/",[!Join [":", ["arn:aws:rekognition", !Ref AWS::Region, !Ref AWS::AccountId, "project"]], !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "*"]]]]
+          - Effect: Allow
+            Action:
+              - sagemaker:DeleteFlowDefinition
+              - sagemaker:CreateFlowDefinition
+              - sagemaker:DescribeFlowDefinition
+            Resource: !Join ["/",[!Join [":", ["arn:aws:sagemaker", !Ref AWS::Region, !Ref AWS::AccountId, "flow-definition"]], !Join ["-", ["*", !Select [6, !Split ['-', !Ref AWS::StackId]], "*"]]]]
+          - Effect: Allow
+            Action:
+              - sagemaker:DescribeHumanTaskUi
+              - sagemaker:DeleteHumanTaskUi
+              - sagemaker:CreateHumanTaskUi
+            Resource: !Join ["/",[!Join [":", ["arn:aws:sagemaker", !Ref AWS::Region, !Ref AWS::AccountId, "human-task-ui"]], !Join ["-", ["*", !Select [6, !Split ['-', !Ref AWS::StackId]], "*"]]]]
+          - Effect: Allow
+            Action:
+              - sagemaker:StartHumanLoop
+              - sagemaker:DescribeWorkteam
+            Resource: "*"
+  LambdaStageRekognitionAssets:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "stage-rekognition-assets"]]
+      Code:
+        ZipFile: !FindInMap [Lambda, CodeBlock, LambdaStageRekognitionAssets]
+      Handler: !FindInMap [Lambda, Settings, Handler]
+      Runtime: !FindInMap [Lambda, Settings, Runtime]
+      Timeout: !FindInMap [Lambda, Settings, Timeout]
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          parameter_store_path: !Join ["/", ["",!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], ""]]
+  LambdaUpdateEventRules:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "update-event-rules"]]
+      Code:
+        ZipFile: !FindInMap [Lambda, CodeBlock, LambdaUpdateEventRules]
+      Handler: !FindInMap [Lambda, Settings, Handler]
+      Runtime: !FindInMap [Lambda, Settings, Runtime]
+      Timeout: !FindInMap [Lambda, Settings, Timeout]
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          parameter_store_path: !Join ["/", ["",!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], ""]]
+  LambdaCheckAutoTraining:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "check-auto-training"]]
+      Code:
+        ZipFile: !FindInMap [Lambda, CodeBlock, LambdaCheckAutoTraining]
+      Handler: !FindInMap [Lambda, Settings, Handler]
+      Runtime: !FindInMap [Lambda, Settings, Runtime]
+      Timeout: !FindInMap [Lambda, Settings, Timeout]
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          parameter_store_path: !Join ["/", ["",!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], ""]]
+  LambdaCreateTrainingManifest:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "create-training-manifest"]]
+      Code:
+        ZipFile: !FindInMap [Lambda, CodeBlock, LambdaCreateTrainingManifest]
+      Handler: !FindInMap [Lambda, Settings, Handler]
+      Runtime: !FindInMap [Lambda, Settings, Runtime]
+      Timeout: !FindInMap [Lambda, Settings, Timeout]
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          parameter_store_path: !Join ["/", ["",!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], ""]]
+  LambdaTrainDeployModel:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "train-deploy-model"]]
+      Code:
+        ZipFile: !FindInMap [Lambda, CodeBlock, LambdaTrainDeployModel]
+      Handler: !FindInMap [Lambda, Settings, Handler]
+      Runtime: !FindInMap [Lambda, Settings, Runtime]
+      Timeout: !FindInMap [Lambda, Settings, Timeout]
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          parameter_store_path: !Join ["/", ["",!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], ""]]
+  LambdaS3EventTrigger:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "s3-event-trigger"]]
+      Code:
+        ZipFile: !FindInMap [Lambda, CodeBlock, LambdaS3EventTrigger]
+      Handler: !FindInMap [Lambda, Settings, Handler]
+      Runtime: !FindInMap [Lambda, Settings, Runtime]
+      Timeout: !FindInMap [Lambda, Settings, Timeout]
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          parameter_store_path: !Join ["/", ["",!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], ""]]
+  LambdaRekognitionDetectLabel:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "rekognition-detect-label"]]
+      Code:
+        ZipFile: !FindInMap [Lambda, CodeBlock, LambdaRekognitionDetectLabel]
+      Handler: !FindInMap [Lambda, Settings, Handler]
+      Runtime: !FindInMap [Lambda, Settings, Runtime]
+      Timeout: !FindInMap [Lambda, Settings, Timeout]
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          parameter_store_path: !Join ["/", ["",!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], ""]]
+  LambdaA2ICreateHumanLoop:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "a2i-create-humanloop"]]
+      Code:
+        ZipFile: !FindInMap [Lambda, CodeBlock, LambdaA2ICreateHumanLoop]
+      Handler: !FindInMap [Lambda, Settings, Handler]
+      Runtime: !FindInMap [Lambda, Settings, Runtime]
+      Timeout: !FindInMap [Lambda, Settings, Timeout]
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          parameter_store_path: !Join ["/", ["",!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], ""]]
+  LambdaA2IHumanLoopData:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "a2i-humanloop-data"]]
+      Code:
+        ZipFile: !FindInMap [Lambda, CodeBlock, LambdaA2IHumanLoopData]
+      Handler: !FindInMap [Lambda, Settings, Handler]
+      Runtime: !FindInMap [Lambda, Settings, Runtime]
+      Timeout: !FindInMap [Lambda, Settings, Timeout]
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          parameter_store_path: !Join ["/", ["",!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], ""]]
+  LambdaS3EventTriggerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref LambdaS3EventTrigger
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !GetAtt S3Bucket.Arn
+  RekognitionProjectAssets:
+    Type: Custom::RekognitionProjectAssets
+    Properties:
+      ServiceToken: !GetAtt LambdaStageRekognitionAssets.Arn
+      StackPrefix: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]]]]
+      Bucket: !Ref S3Bucket
+      LambdaS3EventTriggerArn: !GetAtt LambdaS3EventTrigger.Arn
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "StepFunctionsRole"]]
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: states.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "StepFunctionsPolicy"]]
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+              - xray:PutTraceSegments
+              - xray:PutTelemetryRecords
+              - xray:GetSamplingRules
+              - xray:GetSamplingTargets
+            Resource:
+              - !GetAtt LambdaUpdateEventRules.Arn
+              - !GetAtt LambdaCheckAutoTraining.Arn
+              - !GetAtt LambdaCreateTrainingManifest.Arn
+              - !GetAtt LambdaTrainDeployModel.Arn
+              - !GetAtt LambdaRekognitionDetectLabel.Arn
+              - !GetAtt LambdaA2ICreateHumanLoop.Arn
+              - !GetAtt LambdaA2IHumanLoopData.Arn
+  StepFunctionsProjectStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "project-state-machine"]]
+      DefinitionString: !FindInMap [StepFunctions, Definition, ProjectStateMachine]
+      DefinitionSubstitutions:
+        LambdaUpdateEventRules: !GetAtt LambdaUpdateEventRules.Arn
+        LambdaCheckAutoTraining: !GetAtt LambdaCheckAutoTraining.Arn
+        LambdaCreateTrainingManifest: !GetAtt LambdaCreateTrainingManifest.Arn
+        LambdaTrainDeployModel: !GetAtt LambdaTrainDeployModel.Arn
+        LambdaRekognitionDetectLabel: !GetAtt LambdaRekognitionDetectLabel.Arn
+        LambdaA2ICreateHumanLoop: !GetAtt LambdaA2ICreateHumanLoop.Arn
+        LambdaA2IHumanLoopData: !GetAtt LambdaA2IHumanLoopData.Arn
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+  ParameterSystemVariables:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Description: Do NOT modify this value. This is a reserved parameter consisting of environmental variables and operation data. The value is used and updated by Lambda functions.
+      Name: !Join ["/", ["", !Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "For-System-Use-Only"]]
+      Type: String
+      Value: !Sub |
+        {
+          "s3_bucket": "${S3Bucket}",
+          "events_scheduled_rule": "${EventsRuleScheduledPoll}",
+          "rekognition_project_arn": "${RekognitionProjectAssets.ProjectArn}",
+          "sns-topic": "${SNSTopicRekognition}",
+          "state_machine_arn": "${StepFunctionsProjectStateMachine}",
+          "previous_trained_images": 0,
+          "a2i_workflow": false
+        }
+  ParameterAutoModelTraining:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Description: This value (true/false) determines whether automatic model training is enabled or disabled. When this value is updated to true, a Lambda function enables the EventBride Schedule Rule. When the value is updated to false, a Lambda function disables the EventBride Schedule Rule.
+      Name: !Join ["/", ["", !Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "Enable-Automatic-Training"]]
+      Type: String
+      Value: true
+  ParameterAutoModelTrainingPollFrequency:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Description: This is the polling frequency (in integer minutes) on how often the Amazon Step Functions state machine is triggered to initiate the check for automatic model training. As you update this value, the value is applied to the Amazon EventBridge schedule rule by a Lambda function.
+      Name: !Join ["/", ["", !Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "Automatic-Training-Poll-Frequency"]]
+      Type: String
+      Value: 600
+  ParameterMinimumF1Score:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Description: This value is the minimum F1 Score (Float 0.00-1.00) that evaluate a newly trained model for deployment. If the F1 Score is greater or equal to the minimum F1 Score, the model will be automatically deployed. If not, the model is marked as failed training.
+      Name: !Join ["/", ["", !Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "Minimum-F1-Score"]]
+      Type: String
+      Value: 0.8
+  ParameterAutoA2IWorkflow:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Description: This value (true/false) determines whether an A2I human labeling task is enabled or disabled. If true or enabled, an A2I human labeling task is created when the confidence level from the custom label detection result less than the minimum acceptable confidence level.
+      Name: !Join ["/", ["", !Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "Enable-A2I-Workflow"]]
+      Type: String
+      Value: true
+  ParameterMinimumLabelDetectionConfidence:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Description: Rekognition Custom Labels returns a Confidence between 0-100 on each detection. The Minimum Confidence (Float 0.00-100.00) determines whether a detection result is acceptable. If the detection Confidence is greater than or equal to the Minimum Confidence, then the detection is accepted. If not, the image is sent to A2I process, provided that Enable-A2I-Workflow is enabled.
+      Name: !Join ["/", ["", !Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "Minimum-Label-Detection-Confidence"]]
+      Type: String
+      Value: 70.0
+  ParameterMinimumUntrainedImages:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Description: The value (Int) represents the minimum number of untrained or newly added images that will qualify the state machine to start a new model training. At the instance the EventBridge schedule rule is triggered, the state machine invokes a Lambda function to first determine the total number of training images in the designated S3 folder. Next it retrieves the value "previous_trained_images" from the parameter "For-System-Use-Only". If the difference between the total number of images in S3 and the previous_trained_images is greater than or equal to minimum untrained images, then it will trigger a new model training. On a successful training, a Lambda updates the previous_trained_images with the current total number of images trained.
+      Name: !Join ["/", ["", !Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "Minimum-Untrained-Images"]]
+      Type: String
+      Value: 10
+  ParameterMinimumInferenceUnits:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Description: This value (Int 1-5), with a minimum of 1, inference unit to use for the running Rekognition Customs Label model. A single inference unit represents 1 hour of processing and can support up to 5 Transaction Pers Second (TPS). Use a higher number to increase the TPS throughput of your model. You are charged for the number of inference units that you use.
+      Name: !Join ["/", ["", !Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "Minimum-Inference-Units"]]
+      Type: String
+      Value: 1
+  EventsTriggerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "EventsTriggerRole"]]
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: events.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "EventsTriggerPolicy"]]
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action: states:StartExecution
+            Resource: !Ref StepFunctionsProjectStateMachine
+  EventsRuleScheduledPoll:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "scheduled-poll"]]
+      ScheduleExpression: rate(600 minutes)
+      Targets:
+        - Arn: !Ref StepFunctionsProjectStateMachine
+          Id: !GetAtt StepFunctionsProjectStateMachine.Name
+          RoleArn: !GetAtt EventsTriggerRole.Arn
+  EventsRuleParameterStore:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "paramater-store"]]
+      EventPattern: !Sub |
+        {
+          "source": ["aws.ssm"],
+          "detail-type": ["Parameter Store Change"],
+          "detail": {
+            "name": [
+              "${ParameterAutoModelTrainingPollFrequency}",
+              "${ParameterAutoModelTraining}"
+            ],
+            "operation": ["Update"]
+          }
+        }
+      Targets:
+        - Arn: !Ref StepFunctionsProjectStateMachine
+          Id: !GetAtt StepFunctionsProjectStateMachine.Name
+          RoleArn: !GetAtt EventsTriggerRole.Arn
+  FlowDefinitionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "Flow-Definition-Role"]]
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: sagemaker.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "Flow-Definition-Policy"]]
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:GetObject
+            - s3:PutObject
+            Resource: !Join ["/", [!GetAtt S3Bucket.Arn, "*"]]
+  CognitoUserPool:
+    Condition: CreateWorkTeam
+    Type: AWS::Cognito::UserPool
+    Properties:
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: True
+      UserPoolName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "user-pool"]]
+  CognitoUserPoolUser:
+    Condition: CreateWorkTeam
+    Type: AWS::Cognito::UserPoolUser
+    Properties:
+      UserAttributes:
+        - Name: email
+          Value: !Ref SNSEmail
+      Username: !Ref SNSEmail
+      UserPoolId: !Ref CognitoUserPool
+  CognitoUserPoolGroup:
+    Condition: CreateWorkTeam
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "user-group"]]
+      UserPoolId: !Ref CognitoUserPool
+  CognitoUserPoolUserToGroupAttachment:
+    Condition: CreateWorkTeam
+    Type: AWS::Cognito::UserPoolUserToGroupAttachment
+    Properties:
+      GroupName: !Ref CognitoUserPoolGroup
+      Username: !Ref CognitoUserPoolUser
+      UserPoolId: !Ref CognitoUserPool
+  CognitoUserPoolDomain:
+    Condition: CreateWorkTeam
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Join ["-", ["a2i", !Select [6, !Split ['-', !Ref AWS::StackId]]]]
+      UserPoolId: !Ref CognitoUserPool
+  CognitoUserPoolClient:
+    Condition: CreateWorkTeam
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "app-client"]]
+      AllowedOAuthFlows:
+        - code
+        - implicit
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthScopes:
+        - email
+        - openid
+        - profile
+      ExplicitAuthFlows:
+        - ALLOW_CUSTOM_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      CallbackURLs:
+        - http://localhost
+      DefaultRedirectURI:
+        - http://localhost
+      LogoutURLs:
+        - http://localhost
+      PreventUserExistenceErrors: ENABLED
+      DefaultRedirectURI: http://localhost
+      GenerateSecret: true
+      SupportedIdentityProviders:
+        - COGNITO
+      UserPoolId: !Ref CognitoUserPool
+  A2IWorkteam:
+    Condition: CreateWorkTeam
+    Type: AWS::SageMaker::Workteam
+    Properties:
+      Description: Rekognition Custom Labels A2I Demo
+      MemberDefinitions:
+        - CognitoMemberDefinition:
+            CognitoClientId: !Ref CognitoUserPoolClient
+            CognitoUserGroup: !Ref CognitoUserPoolGroup
+            CognitoUserPool: !Ref CognitoUserPool
+      WorkteamName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "a2i-work-team"]]
+  LambdaStageA2IAssets:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "stage-a2i-assets"]]
+      Code:
+        ZipFile: !FindInMap [Lambda, CodeBlock, LambdaStageA2IAssets]
+      Handler: !FindInMap [Lambda, Settings, Handler]
+      Runtime: !FindInMap [Lambda, Settings, Runtime]
+      Timeout: !FindInMap [Lambda, Settings, Timeout]
+      Role: !GetAtt LambdaExecutionRole.Arn
+  A2IWorkFlowAssets:
+    Type: Custom::A2IWorkFlowAssets
+    Properties:
+      ServiceToken: !GetAtt LambdaStageA2IAssets.Arn
+      StackPrefix: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]]]]
+      TaskUiTemplate: !FindInMap [A2I, Template, TaskUiTemplate]
+      WorkTeam: !If [CreateWorkTeam, !GetAtt A2IWorkteam.WorkteamName, !Ref A2IPrivateTeamName]
+      FlowDefinitionRole: !GetAtt FlowDefinitionRole.Arn
+      S3Bucket: !Ref S3Bucket
+      ParameterName: !Ref ParameterSystemVariables
+Outputs:
+  A2IWorkteam:
+    Value: !GetAtt A2IWorkteam.WorkteamName
+    Condition: CreateWorkTeam
+  RekogntionProjectArn:
+    Value: !GetAtt RekognitionProjectAssets.ProjectArn
+  S3Bucket:
+    Value: !Ref S3Bucket
+  S3BucketArn:
+    Value: !GetAtt S3Bucket.Arn
+  SNSEmail:
+    Value: !Ref SNSEmail
+Mappings:
+  Lambda:
+    Settings:
+      Runtime: python3.8
+      Timeout: 15
+      Handler: index.handler
+    CodeBlock:
+      LambdaStageRekognitionAssets: |
+        import cfnresponse
+        import boto3
+        import json
+        import os
+        rekognition=boto3.client('rekognition')
+        s3 = boto3.client('s3')
+        ssm = boto3.client('ssm')
+        def handler(event, context):
+          responseData = {}
+          responseData['ProjectArn'] = 'Deleted'
+          project_name=event['ResourceProperties']['StackPrefix'] + '-custom-labels-project'
+          if event['RequestType'] == 'Create':
+            bucket=event['ResourceProperties']['Bucket']
+            lambda_arn=event['ResourceProperties']['LambdaS3EventTriggerArn']
+            try:
+              s3.put_object(Bucket=bucket, Key='images_labeled_by_folder/')
+              s3.put_object(Bucket=bucket, Key='a2i-human-loop-data/')
+              s3.put_object(Bucket=bucket, Key='images_for_detection/')
+              s3.put_object(Bucket=bucket, Key='manifests/')
+              s3.put_object(Bucket=bucket, Key='evaluation/')
+              s3.put_bucket_notification_configuration(
+                Bucket=bucket,
+                NotificationConfiguration={
+                  'LambdaFunctionConfigurations': [
+                    {
+                      'LambdaFunctionArn': lambda_arn,
+                      'Events': ['s3:ObjectCreated:Put'],
+                      'Filter': {'Key': {'FilterRules': [{'Name': 'prefix', 'Value': 'images_for_detection/'}]}}
+                    },
+                    {
+                      'LambdaFunctionArn': lambda_arn,
+                      'Events': ['s3:ObjectCreated:Put'],
+                      'Filter': {'Key': {'FilterRules': [{'Name': 'prefix', 'Value': 'a2i-human-loop-data/'}, {'Name': 'suffix', 'Value': '.json'}]}}
+                    }
+                  ]
+                }
+              )
+              response=rekognition.create_project(ProjectName=project_name)
+              responseData['ProjectArn'] = response['ProjectArn']
+            except:
+              cfnresponse.send(event, context, cfnresponse.FAILED, responseData)
+            else:
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+          else:
+            try:
+              parameter_name = os.environ['parameter_store_path'] + 'For-System-Use-Only'
+              response = ssm.get_parameter(Name=parameter_name)
+              parameter =  json.loads(response['Parameter']['Value'])
+              responseData['ProjectArn'] = parameter['rekognition_project_arn']
+              if event['RequestType'] == 'Delete':
+                response = rekognition.describe_project_versions(ProjectArn=responseData['ProjectArn'])
+                for project_version in response['ProjectVersionDescriptions']:
+                  if project_version['Status'] == 'RUNNING':
+                    rekognition.stop_project_version(ProjectVersionArn=project_version['ProjectVersionArn'])
+            except:
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+            else:
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+          return {'message': responseData}
+      LambdaUpdateEventRules: |
+        import json
+        import os
+        import boto3
+        ssm = boto3.client('ssm')
+        events = boto3.client('events')
+        sns = boto3.client('sns')
+        def get_parameters():
+            response = ssm.get_parameters_by_path(
+                Path=os.environ['parameter_store_path'],
+                Recursive=True
+            )
+            parameter_store = {}
+            for parameter in response['Parameters']:
+                parameter_name = (parameter['Name'].split('/'))[-1]
+                parameter_store[parameter_name] = parameter['Value']
+            return parameter_store
+        def publish_message(sns_subject, sns_message, topic_arn):
+            response = sns.publish(
+                TopicArn=topic_arn,
+                Message=sns_message,
+                Subject=sns_subject
+            )
+        def handler(event, context):
+            parameter_store = get_parameters()
+            sys_vars = json.loads(parameter_store['For-System-Use-Only'])
+            if 'Automatic-Training-Poll-Frequency' in event['detail']['name']:
+                resource = sys_vars['events_scheduled_rule']
+                value = 'rate(' + parameter_store['Automatic-Training-Poll-Frequency'] + ' minutes)'
+                response = events.put_rule(Name=resource, ScheduleExpression=value)
+            elif 'Enable-Automatic-Training' in event['detail']['name']:
+                resource = sys_vars['events_scheduled_rule']
+                if parameter_store['Enable-Automatic-Training'] in ['True', 'true', 'TRUE']:
+                    value = 'Enabled'
+                    response = events.enable_rule(Name=resource)
+                else:
+                    response = events.disable_rule(Name=resource)
+                    value = 'Disabled'
+            publish_message('Parameter Applied '+resource, json.dumps(response), sys_vars['sns-topic'])
+            response = {'NextTask': 'End', 'Value': value , 'Resource': resource, 'Response': response, 'Event': event }
+            return {
+                'message': response
+            }
+      LambdaCheckAutoTraining: |
+        import json
+        import os
+        import boto3
+        ssm = boto3.client('ssm')
+        s3_resource = boto3.resource('s3')
+        sns = boto3.client('sns')
+        rekognition = boto3.client('rekognition')
+        def get_parameters():
+            response = ssm.get_parameters_by_path(
+                Path=os.environ['parameter_store_path'],
+                Recursive=True
+            )
+            parameter_store = {}
+            for parameter in response['Parameters']:
+                parameter_name = (parameter['Name'].split('/'))[-1]
+                parameter_store[parameter_name] = parameter['Value']
+            return parameter_store
+        def publish_message(sns_subject, sns_message, topic_arn):
+            response = sns.publish(
+                TopicArn=topic_arn,
+                Message=sns_message,
+                Subject=sns_subject
+            )
+        def handler(event, context):
+            parameter_store = get_parameters()
+            sys_vars = json.loads(parameter_store['For-System-Use-Only'])
+            del parameter_store['For-System-Use-Only']
+            next_task = 'End'
+            if parameter_store['Enable-Automatic-Training'] in ['True', 'true', 'TRUE']:
+                s3_bucket = sys_vars['s3_bucket']
+                bucket = s3_resource.Bucket(s3_bucket)
+                image_count = -1
+                for object in bucket.objects.filter(Prefix='images_labeled_by_folder/'):
+                    image_count += 1
+                trained_image = int(sys_vars['previous_trained_images'])
+                untrained_images = image_count - trained_image
+                if untrained_images >= int(parameter_store['Minimum-Untrained-Images']):
+                    project_arn = sys_vars['rekognition_project_arn']
+                    response = rekognition.describe_project_versions(ProjectArn=project_arn)
+                    next_task = 'CreateManifest'
+                    task_details = "New training criteria met."
+                    for project_version in response['ProjectVersionDescriptions']:
+                        if project_version['Status'] in ['TRAINING_IN_PROGRESS', 'STARTING']:
+                            next_task = 'End'
+                            task_details = 'Preject Version ' + project_version['ProjectVersionArn'] + ' is currently in training'
+                            break
+                else:
+                    task_details =  'Minimum Number Untrained Images Condition Not Met'
+            else:
+                task_details =  'Autmatic training option is disabled'
+            response = {'NextTask': next_task, 'Task': {'Details': task_details}, 'UserSettings': parameter_store, 'Project': sys_vars}
+            publish_message('Checked for Automatic Model Training', task_details, sys_vars['sns-topic'])
+            return {
+                'message': response
+            }
+      LambdaCreateTrainingManifest: |
+        import json
+        import boto3
+        import os
+        import datetime
+        s3 = boto3.client('s3')
+        paginator = s3.get_paginator('list_objects_v2')
+        s3_resource = boto3.resource('s3')
+        sns = boto3.client('sns')
+        def publish_message(sns_subject, sns_message, topic_arn):
+            response = sns.publish(
+                TopicArn=topic_arn,
+                Message=sns_message,
+                Subject=sns_subject
+            )
+        def handler(event, context):
+            s3_bucket = event['message']['Project']['s3_bucket']
+            image_count = 0
+            pages = paginator.paginate(Bucket=s3_bucket)
+            f = open("/tmp/manifest.txt", "a")
+            for page in pages:
+                for image in page['Contents']:
+                    object = image['Key'].split("/")
+                    if len(object) == 3 and object[0] == 'images_labeled_by_folder':
+                        creation_date = image['LastModified'].strftime("%Y-%m-%dT%H:%M:%S.0000")
+                        json_text = {
+                            "source-ref": "s3://" + s3_bucket + "/" + image['Key'],
+                            "rekongition-custom-labels-dog-breed": 1,
+                            "rekongition-custom-labels-dog-breed-metadata": {
+                                "confidence": 1,
+                                "class-name": object[1],
+                                "human-annotated": "yes",
+                                "creation-date": creation_date,
+                                "type": "groundtruth/image-classification"
+                            }
+                        }
+                        json_object = json.dumps(json_text)
+                        f.write(json_object + '\n')
+                        image_count += 1
+            f.close()
+            file_name = 'manifests/groundtruth-' + datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S") + '.manifest'
+            s3_resource.meta.client.upload_file('/tmp/manifest.txt', s3_bucket, file_name)
+            response = event['message']
+            response['NextTask'] = 'CreateProjectVersion'
+            response['Task'] = {'Manifest':  file_name, 'TotalImages': image_count}
+            publish_message('New Training Manifest Created', json.dumps(response['Task']), event['message']['Project']['sns-topic'])
+            return {
+                'message': response
+            }
+      LambdaTrainDeployModel: |
+        import json
+        import boto3
+        import os
+        import datetime
+        ssm = boto3.client('ssm')
+        rekognition = boto3.client('rekognition')
+        sns = boto3.client('sns')
+        def publish_message(sns_subject, sns_message, topic_arn):
+            response = sns.publish(
+                TopicArn=topic_arn,
+                Message=sns_message,
+                Subject=sns_subject
+            )
+        def handler(event, context):
+            response = event['message']
+            project_arn = event['message']['Project']['rekognition_project_arn']
+            s3_bucket = event['message']['Project']['s3_bucket']
+            if event['message']['NextTask'] == 'CreateProjectVersion':
+                version_name = datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")
+                rekognition_response = rekognition.create_project_version(
+                    ProjectArn=project_arn,
+                    VersionName=version_name,
+                    OutputConfig={'S3Bucket':s3_bucket, 'S3KeyPrefix':'evaluation/'},
+                    TrainingData={'Assets': [{'GroundTruthManifest': {'S3Object': {'Bucket': s3_bucket,'Name': event['message']['Task']['Manifest']}}},]},
+                    TestingData={'AutoCreate': True}
+                )
+                response['Task']['ProjectVersionArn'] = rekognition_response['ProjectVersionArn']
+                response['Task']['VersionName'] = version_name
+                next_task = 'DescribeProjectVersions'
+            elif event['message']['NextTask'] == 'DescribeProjectVersions':
+                version_name = event['message']['Task']['VersionName']
+                rekognition_response = rekognition.describe_project_versions(ProjectArn=project_arn, VersionNames=[version_name])
+                status = rekognition_response['ProjectVersionDescriptions'][0]['Status']
+                if status in ['TRAINING_IN_PROGRESS', 'STARTING']:
+                    next_task = 'DescribeProjectVersions'
+                elif status == 'TRAINING_COMPLETED':
+                    if rekognition_response['ProjectVersionDescriptions'][0]['EvaluationResult']['F1Score'] >= float(event['message']['UserSettings']['Minimum-F1-Score']):
+                        next_task = 'StartProjectVersion'
+                    else:
+                        next_task = 'FailedF1Evaluation'
+                        status = next_task
+                elif status == 'RUNNING':
+                    next_task = 'ModelRunning'
+                else:
+                    next_task = 'FAILED'
+                publish_message('Rekognition Model Status', 'Status: '+status+'\n'+json.dumps(response['Task']), event['message']['Project']['sns-topic'])
+            elif event['message']['NextTask'] == 'StartProjectVersion':
+                project_version_arn = event['message']['Task']['ProjectVersionArn']
+                min_inteference_unit = int(event['message']['UserSettings']['Minimum-Inference-Units'])
+                rekognition_response = rekognition.start_project_version(ProjectVersionArn=project_version_arn, MinInferenceUnits=min_inteference_unit)
+                next_task = 'DescribeProjectVersions'
+            elif event['message']['NextTask'] == 'ModelRunning':
+                parameter_name = os.environ['parameter_store_path']+'For-System-Use-Only'
+                project_version_arn = event['message']['Task']['ProjectVersionArn']
+                event['message']['Project']['rekognition_project_version_arn'] = project_version_arn
+                event['message']['Project']['previous_trained_images'] = event['message']['Task']['TotalImages']
+                ssm_response = ssm.put_parameter(Name=parameter_name, Value=json.dumps(event['message']['Project']), Type='String',Overwrite=True)
+                rekognition_response = rekognition.describe_project_versions(ProjectArn=project_arn)
+                for project_version in rekognition_response['ProjectVersionDescriptions']:
+                    if project_version['Status'] == 'RUNNING' and project_version['ProjectVersionArn'] != project_version_arn:
+                        rekognition.stop_project_version(ProjectVersionArn=project_version['ProjectVersionArn'])
+                rekognition_response = rekognition.describe_project_versions(ProjectArn=project_arn)
+                next_task = 'Succeed'
+            response['NextTask'] = next_task
+            response['Response'] = json.loads(json.dumps(rekognition_response, default=str))
+            return {
+                'message': response
+            }
+      LambdaRekognitionDetectLabel: |
+        import json
+        import os
+        import boto3
+        import uuid
+        ssm = boto3.client('ssm')
+        sns = boto3.client('sns')
+        rekognition = boto3.client('rekognition')
+        def get_parameters():
+            response = ssm.get_parameters_by_path(
+                Path=os.environ['parameter_store_path'],
+                Recursive=True
+            )
+            parameter_store = {}
+            for parameter in response['Parameters']:
+                parameter_name = (parameter['Name'].split('/'))[-1]
+                parameter_store[parameter_name] = parameter['Value']
+            return parameter_store
+        def publish_message(sns_subject, sns_message, topic_arn):
+            response = sns.publish(
+                TopicArn=topic_arn,
+                Message=sns_message,
+                Subject=sns_subject
+            )
+        def handler(event, context):
+            parameter_store = get_parameters()
+            sys_vars = json.loads(parameter_store['For-System-Use-Only'])
+            response = rekognition.detect_custom_labels(
+                ProjectVersionArn=sys_vars['rekognition_project_version_arn'],
+                Image={
+                    'S3Object': {
+                        'Bucket': event['s3event']['s3']['bucket']['name'],
+                        'Name': event['s3event']['s3']['object']['key']
+                    }
+                },
+                MaxResults=1,
+                MinConfidence=0
+            )
+            confidence_level = response['CustomLabels'][0]['Confidence']
+            publish_message('Rekgnition Custom Labels Detection Invoked', json.dumps(response), sys_vars['sns-topic'])
+            if confidence_level < float(parameter_store['Minimum-Label-Detection-Confidence']):
+                if parameter_store['Enable-A2I-Workflow'] in ['True', 'true', 'TRUE']:
+                    response['A2I'] = True
+                else:
+                    response['A2I'] = False
+            response['s3event'] = event['s3event']
+            return {
+                'message': response
+            }
+      LambdaA2ICreateHumanLoop: |
+        import json
+        import os
+        import boto3
+        import uuid
+        sns = boto3.client('sns')
+        a2i = boto3.client('sagemaker-a2i-runtime')
+        ssm = boto3.client('ssm')
+        def get_parameter(parameter_name):
+            response = ssm.get_parameter(Name=parameter_name)
+            parameter_value = json.loads(response['Parameter']['Value'])
+            return parameter_value
+        def publish_message(sns_subject, sns_message, topic_arn):
+            response = sns.publish(
+                TopicArn=topic_arn,
+                Message=sns_message,
+                Subject=sns_subject
+            )
+        def handler(event, context):
+            parameter_name = os.environ['parameter_store_path'] + 'For-System-Use-Only'
+            sys_vars = get_parameter(parameter_name)
+            response = a2i.start_human_loop(
+                HumanLoopName = str(uuid.uuid4()),
+                FlowDefinitionArn = sys_vars['flow_definition_arn'],
+                HumanLoopInput = {
+                    'InputContent': json.dumps({
+                        'initialValue': event['message']['CustomLabels'][0]['Confidence'],
+                        'taskObject': 's3://'+event['message']['s3event']['s3']['bucket']['name']+'/'+event['message']['s3event']['s3']['object']['key']
+                    })
+                }
+            )
+            response['s3event'] = event['message']['s3event']
+            publish_message('A2I Human Loop Initiated', json.dumps(response), sys_vars['sns-topic'])
+            return {
+                'message': response
+            }
+      LambdaA2IHumanLoopData: |
+        import json
+        import os
+        import boto3
+        s3 = boto3.client('s3')
+        s3_resource = boto3.resource('s3')
+        ssm = boto3.client('ssm')
+        def get_parameter(parameter_name):
+            response = ssm.get_parameter(Name=parameter_name)
+            return json.loads(response['Parameter']['Value'])
+        def handler(event, context):
+            parameter_name = os.environ['parameter_store_path'] + 'For-System-Use-Only'
+            sys_vars = get_parameter(parameter_name)
+            bucket = event['s3event']['s3']['bucket']['name']
+            key = event['s3event']['s3']['object']['key']
+            response = s3.get_object(Bucket = bucket, Key = key)
+            response = json.loads(response['Body'].read())
+            if len(response['humanAnswers']) != 0:
+                label = response['humanAnswers'][0]['answerContent']['crowd-image-classifier']['label']
+                if label != 'None of the Above':
+                    taskObject = response['inputContent']['taskObject']
+                    bucket, key = taskObject.replace("s3://", "").split("/", 1)
+                    copy_source = {'Bucket': bucket, 'Key': key}
+                    image_name = 'humanLoopName-' + response['humanLoopName'] + '-' + taskObject.split('/')[-1]
+                    new_key = 'images_labeled_by_folder/' + label + '/' + image_name
+                    s3_resource.meta.client.copy(copy_source, sys_vars['s3_bucket'], new_key)
+            response['s3event'] = event['s3event']
+            return {
+                'message': response
+            }
+      LambdaS3EventTrigger: |
+        import json
+        import os
+        import uuid
+        import boto3
+        sfn = boto3.client('stepfunctions')
+        ssm = boto3.client('ssm')
+        def get_parameter(parameter_name):
+            response = ssm.get_parameter(Name=parameter_name)
+            return json.loads(response['Parameter']['Value'])
+        def handler(event, context):
+            parameter_name = os.environ['parameter_store_path'] + 'For-System-Use-Only'
+            sys_vars = get_parameter(parameter_name)
+            for item in event['Records']:
+                input = {}
+                if 'images_for_detection' in item['s3']['object']['key']:
+                    input['source'] = 's3-detection-event'
+                elif 'a2i-human-loop-data' in item['s3']['object']['key']:
+                    input['source'] = 's3-a2i-event'
+                else:
+                    input['source'] = ''
+                input['s3event'] = item
+                response = sfn.start_execution(
+                    stateMachineArn = sys_vars['state_machine_arn'],
+                    name = str(uuid.uuid4()),
+                    input = json.dumps(input, default=str)
+                )
+            return {
+                'message': json.dumps(response, default=str)
+            }
+      LambdaStageA2IAssets: |
+        import cfnresponse
+        import json
+        import boto3
+        sagemaker = boto3.client('sagemaker')
+        ssm = boto3.client('ssm')
+        def get_parameter(parameter_name):
+            response = ssm.get_parameter(Name=parameter_name)
+            parameter_value = json.loads(response['Parameter']['Value'])
+            return parameter_value
+        def handler(event, context):
+            responseData = {}
+            responseData['HumanTaskUiArn'] = 'Resource Deleted'
+            responseData['FlowDefinitionArn'] = 'Resource Deleted'
+            parameter_name = event['ResourceProperties']['ParameterName']
+            prefix = event['ResourceProperties']['StackPrefix'].lower()
+            task_ui_name = prefix + '-task-ui'
+            flow_definition_name = prefix + '-flow-definition'
+            if event['RequestType'] == 'Create':
+                try:
+                    response = sagemaker.create_human_task_ui(
+                        HumanTaskUiName=task_ui_name,
+                        UiTemplate={
+                            'Content': event['ResourceProperties']['TaskUiTemplate']
+                        }
+                    )
+                    responseData['HumanTaskUiArn'] = response['HumanTaskUiArn']
+                    response = sagemaker.describe_workteam(WorkteamName=event['ResourceProperties']['WorkTeam'])
+                    response = sagemaker.create_flow_definition(
+                        FlowDefinitionName = flow_definition_name,
+                        RoleArn= event['ResourceProperties']['FlowDefinitionRole'],
+                        HumanLoopConfig= {
+                            "WorkteamArn": response['Workteam']['WorkteamArn'],
+                            "HumanTaskUiArn": responseData['HumanTaskUiArn'],
+                            "TaskCount": 1,
+                            "TaskDescription": "Identify Dog Breed In Images",
+                            "TaskTitle": "Identify Dog Breed",
+                        },
+                        OutputConfig={
+                            "S3OutputPath": 's3://'+ event['ResourceProperties']['S3Bucket'] + '/a2i-human-loop-data/'
+                        }
+                    )
+                    responseData['FlowDefinitionArn'] = response['FlowDefinitionArn']
+                    parameter_value = get_parameter(parameter_name)
+                    parameter_value['flow_definition_arn'] = responseData['FlowDefinitionArn']
+                    ssm.put_parameter(Name=parameter_name, Value=json.dumps(parameter_value), Type='String',Overwrite=True)
+                except:
+                    cfnresponse.send(event, context, cfnresponse.FAILED, responseData)
+                else:
+                    cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+            else:
+                try:
+                    response = sagemaker.describe_flow_definition(FlowDefinitionName=flow_definition_name)
+                    responseData['FlowDefinitionArn'] = response['FlowDefinitionArn']
+                    response = sagemaker.describe_human_task_ui(HumanTaskUiName=task_ui_name)
+                    responseData['HumanTaskUiArn'] = response['HumanTaskUiArn']
+                    if event['RequestType'] == 'Delete':
+                        sagemaker.delete_flow_definition(FlowDefinitionName=flow_definition_name)
+                        sagemaker.delete_human_task_ui(HumanTaskUiName=task_ui_name)
+                        parameter_value = get_parameter(parameter_name)
+                        parameter_value['flow_definition_arn'] = ''
+                        response = ssm.put_parameter(Name=parameter_name, Value=json.dumps(parameter_value), Type='String',Overwrite=True)
+                except:
+                    cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+                else:
+                    cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+            return {'message': responseData}
+  StepFunctions:
+    Definition:
+      ProjectStateMachine: |
+        {
+          "Comment": "Rekognition Custom Labels with A2I Workflows",
+          "StartAt": "Event",
+          "States": {
+            "Event": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.source",
+                  "StringEquals": "aws.ssm",
+                  "Next": "Parameter Store"
+                },
+                {
+                  "Variable": "$.source",
+                  "StringEquals": "aws.events",
+                  "Next": "Rekongition Model"
+                },
+                {
+                  "Variable": "$.source",
+                  "StringEquals": "s3-detection-event",
+                  "Next": "Rekongition Detection"
+                },
+                {
+                  "Variable": "$.source",
+                  "StringEquals": "s3-a2i-event",
+                  "Next": "A2I HumanLoop Data"
+                }
+              ],
+              "Default": "Unknown Event"
+            },
+            "Parameter Store": {
+              "Type": "Pass",
+              "Next": "Apply Parameter"
+            },
+            "Apply Parameter": {
+              "Type": "Task",
+              "Resource": "${LambdaUpdateEventRules}",
+              "End": true
+            },
+            "Rekongition Model": {
+              "Type": "Task",
+              "Resource": "${LambdaCheckAutoTraining}",
+              "Next": "Check New Training"
+            },
+            "Check New Training": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.message.NextTask",
+                  "StringEquals": "CreateManifest",
+                  "Next": "Initiate Training"
+                }
+              ],
+              "Default": "No New Training"
+            },
+            "No New Training": {
+              "Type": "Succeed"
+            },
+            "Initiate Training": {
+              "Type": "Pass",
+              "Next": "Create Manifest"
+            },
+            "Create Manifest": {
+              "Type": "Task",
+              "Resource": "${LambdaCreateTrainingManifest}",
+              "Next": "Create Project Version"
+            },
+            "Create Project Version": {
+              "Type": "Task",
+              "Resource": "${LambdaTrainDeployModel}",
+              "Next": "Wait for Training"
+            },
+            "Wait for Training": {
+              "Type": "Wait",
+              "Seconds": 300,
+              "Next": "Get Training Status"
+            },
+            "Get Training Status": {
+              "Type": "Task",
+              "Resource": "${LambdaTrainDeployModel}",
+              "Next": "Training-in-Progress"
+            },
+            "Training-in-Progress": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.message.NextTask",
+                  "StringEquals": "DescribeProjectVersions",
+                  "Next": "Wait for Training"
+                },
+                {
+                  "Variable": "$.message.NextTask",
+                  "StringEquals": "StartProjectVersion",
+                  "Next": "Training Completed"
+                },
+                {
+                  "Variable": "$.message.NextTask",
+                  "StringEquals": "FailedF1Evaluation",
+                  "Next": "Failed F1 Score"
+                }
+              ],
+              "Default": "Failure"
+            },
+            "Training Completed": {
+              "Type": "Pass",
+              "Next": "Start Model"
+            },
+            "Failed F1 Score": {
+              "Type": "Pass",
+              "Next": "Failure"
+            },
+            "Start Model": {
+              "Type": "Task",
+              "Resource": "${LambdaTrainDeployModel}",
+              "Next": "Wait for Start"
+            },
+            "Wait for Start": {
+              "Type": "Wait",
+              "Seconds": 300,
+              "Next": "Get Model Status"
+            },
+            "Get Model Status": {
+              "Type": "Task",
+              "Resource": "${LambdaTrainDeployModel}",
+              "Next": "Starting-in-Progress"
+            },
+            "Starting-in-Progress": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.message.NextTask",
+                  "StringEquals": "DescribeProjectVersions",
+                  "Next": "Wait for Start"
+                },
+                {
+                  "Variable": "$.message.NextTask",
+                  "StringEquals": "ModelRunning",
+                  "Next": "Model Started"
+                }
+              ],
+              "Default": "Failure"
+            },
+            "Model Started": {
+              "Type": "Pass",
+              "Next": "Deploy Endpoint"
+            },
+            "Deploy Endpoint": {
+              "Type": "Task",
+              "Resource": "${LambdaTrainDeployModel}",
+              "End": true
+            },
+            "Rekongition Detection": {
+              "Type": "Task",
+              "Resource": "${LambdaRekognitionDetectLabel}",
+              "Next": "Check Confidence"
+            },
+            "Check Confidence": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.message.A2I",
+                  "IsPresent": true,
+                  "Next": "Failed Confidence"
+                }
+              ],
+              "Default": "Pass Confidence"
+            },
+            "Failed Confidence": {
+              "Type": "Pass",
+              "Next": "Check A2I"
+            },
+            "Check A2I": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.message.A2I",
+                  "BooleanEquals": true,
+                  "Next": "Create HumanLoop"
+                }
+              ],
+              "Default": "A2I Off"
+            },
+            "A2I Off": {
+              "Type": "Pass",
+              "End": true
+            },
+            "Create HumanLoop": {
+              "Type": "Task",
+              "Resource": "${LambdaA2ICreateHumanLoop}",
+              "End": true
+            },
+            "Pass Confidence": {
+              "Type": "Succeed"
+            },
+            "A2I HumanLoop Data": {
+              "Type": "Task",
+              "Resource": "${LambdaA2IHumanLoopData}",
+              "Next": "Add Training Image"
+            },
+            "Add Training Image": {
+              "Type": "Pass",
+              "End": true
+            },
+            "Failure": {
+              "Type": "Fail"
+            },
+            "Unknown Event": {
+              "Type": "Fail"
+            }
+          }
+        }
+  A2I:
+      Template:
+        TaskUiTemplate: |
+          <script src="https://assets.crowd.aws/crowd-html-elements.js"></script>
+          <crowd-form>
+            <crowd-image-classifier
+              name="crowd-image-classifier"
+              src="{{ task.input.taskObject | grant_read_access }}"
+              header="Please Select Correct Dog Breed"
+              categories="['aws_logo', 'amazon_logo', 'wholefood_logo','None of the Above']"
+            >
+              <full-instructions header="Classification Instructions">
+                <p>Please select the correct dog breed for this image. Select None of Above if the image is not a dog or the dog breed cannot be identified.</p>
+              </full-instructions>
+              <short-instructions>
+                <p>Please select the correct dog breed for this image. Select None of Above if the image is not a dog or the dog breed cannot be identified..</p>
+              </short-instructions>
+            </crowd-image-classifier>
+          </crowd-form>

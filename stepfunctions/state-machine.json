@@ -1,0 +1,211 @@
+{
+  "Comment": "Rekognition Custom Labels with A2I Workflows",
+  "StartAt": "Event",
+  "States": {
+    "Event": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.source",
+          "StringEquals": "aws.ssm",
+          "Next": "Parameter Store"
+        },
+        {
+          "Variable": "$.source",
+          "StringEquals": "aws.events",
+          "Next": "Rekongition Model"
+        },
+        {
+          "Variable": "$.source",
+          "StringEquals": "s3-detection-event",
+          "Next": "Rekongition Detection"
+        },
+        {
+          "Variable": "$.source",
+          "StringEquals": "s3-a2i-event",
+          "Next": "A2I HumanLoop Data"
+        }
+      ],
+      "Default": "Unknown Event"
+    },
+    "Parameter Store": {
+      "Type": "Pass",
+      "Next": "Apply Parameter"
+    },
+    "Apply Parameter": {
+      "Type": "Task",
+      "Resource": "${LambdaUpdateEventRules}",
+      "End": true
+    },
+    "Rekongition Model": {
+      "Type": "Task",
+      "Resource": "${LambdaCheckAutoTraining}",
+      "Next": "Check New Training"
+    },
+    "Check New Training": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.message.NextTask",
+          "StringEquals": "CreateManifest",
+          "Next": "Initiate Training"
+        }
+      ],
+      "Default": "No New Training"
+    },
+    "No New Training": {
+      "Type": "Succeed"
+    },
+    "Initiate Training": {
+      "Type": "Pass",
+      "Next": "Create Manifest"
+    },
+    "Create Manifest": {
+      "Type": "Task",
+      "Resource": "${LambdaCreateTrainingManifest}",
+      "Next": "Create Project Version"
+    },
+    "Create Project Version": {
+      "Type": "Task",
+      "Resource": "${LambdaTrainDeployModel}",
+      "Next": "Wait for Training"
+    },
+    "Wait for Training": {
+      "Type": "Wait",
+      "Seconds": 300,
+      "Next": "Get Training Status"
+    },
+    "Get Training Status": {
+      "Type": "Task",
+      "Resource": "${LambdaTrainDeployModel}",
+      "Next": "Training-in-Progress"
+    },
+    "Training-in-Progress": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.message.NextTask",
+          "StringEquals": "DescribeProjectVersions",
+          "Next": "Wait for Training"
+        },
+        {
+          "Variable": "$.message.NextTask",
+          "StringEquals": "StartProjectVersion",
+          "Next": "Training Completed"
+        },
+        {
+          "Variable": "$.message.NextTask",
+          "StringEquals": "FailedF1Evaluation",
+          "Next": "Failed F1 Score"
+        }
+      ],
+      "Default": "Failure"
+    },
+    "Training Completed": {
+      "Type": "Pass",
+      "Next": "Start Model"
+    },
+    "Failed F1 Score": {
+      "Type": "Pass",
+      "Next": "Failure"
+    },
+    "Start Model": {
+      "Type": "Task",
+      "Resource": "${LambdaTrainDeployModel}",
+      "Next": "Wait for Start"
+    },
+    "Wait for Start": {
+      "Type": "Wait",
+      "Seconds": 300,
+      "Next": "Get Model Status"
+    },
+    "Get Model Status": {
+      "Type": "Task",
+      "Resource": "${LambdaTrainDeployModel}",
+      "Next": "Starting-in-Progress"
+    },
+    "Starting-in-Progress": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.message.NextTask",
+          "StringEquals": "DescribeProjectVersions",
+          "Next": "Wait for Start"
+        },
+        {
+          "Variable": "$.message.NextTask",
+          "StringEquals": "ModelRunning",
+          "Next": "Model Started"
+        }
+      ],
+      "Default": "Failure"
+    },
+    "Model Started": {
+      "Type": "Pass",
+      "Next": "Deploy Endpoint"
+    },
+    "Deploy Endpoint": {
+      "Type": "Task",
+      "Resource": "${LambdaTrainDeployModel}",
+      "End": true
+    },
+    "Rekongition Detection": {
+      "Type": "Task",
+      "Resource": "${LambdaRekognitionDetectLabel}",
+      "Next": "Check Confidence"
+    },
+    "Check Confidence": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.message.A2I",
+          "IsPresent": true,
+          "Next": "Failed Confidence"
+        }
+      ],
+      "Default": "Pass Confidence"
+    },
+    "Failed Confidence": {
+      "Type": "Pass",
+      "Next": "Check A2I"
+    },
+    "Check A2I": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.message.A2I",
+          "BooleanEquals": true,
+          "Next": "Create HumanLoop"
+        }
+      ],
+      "Default": "A2I Off"
+    },
+    "A2I Off": {
+      "Type": "Pass",
+      "End": true
+    },
+    "Create HumanLoop": {
+      "Type": "Task",
+      "Resource": "${LambdaA2ICreateHumanLoop}",
+      "End": true
+    },
+    "Pass Confidence": {
+      "Type": "Succeed"
+    },
+    "A2I HumanLoop Data": {
+      "Type": "Task",
+      "Resource": "${LambdaA2IHumanLoopData}",
+      "Next": "Add Training Image"
+    },
+    "Add Training Image": {
+      "Type": "Pass",
+      "End": true
+    },
+    "Failure": {
+      "Type": "Fail"
+    },
+    "Unknown Event": {
+      "Type": "Fail"
+    }
+  }
+}
