@@ -71,4 +71,4 @@ Amazon EventBridge is a serverless event bus service that makes it easy to conne
 [Amazon Cognito](https://aws.amazon.com/cognito/) lets you add user sign-up, sign-in, and access control to your web and mobile apps quickly and easily. We optionally deploy a Cognito User Pool and an App Client, if none existed, as part of initial CloudFormation deployment process. The Ground Truth Private Workforce has a dependency on the Cognito User Pool and an App Client to function.
 
 
-Next Step: [0-Prequisites](./0-Prequisites/)
+Next Step: [0-Prerequisites](./0-Prerequisites/)

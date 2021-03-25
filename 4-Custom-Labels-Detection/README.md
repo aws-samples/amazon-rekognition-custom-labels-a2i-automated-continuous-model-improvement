@@ -1,4 +1,4 @@
-## 4-Custom-Labels-Dection
+## 4-Custom-Labels-Detection
 
 **Amazon Rekognition Custom Label Detection**  
 In this section we will walk through the steps on how to invoke Rekognition detection and to trigger the A2I Human Loop process.
