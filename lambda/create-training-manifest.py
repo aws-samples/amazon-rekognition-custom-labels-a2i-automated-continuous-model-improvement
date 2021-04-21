@@ -24,8 +24,8 @@ def handler(event, context):
                 creation_date = image['LastModified'].strftime("%Y-%m-%dT%H:%M:%S.0000")
                 json_text = {
                     "source-ref": "s3://" + s3_bucket + "/" + image['Key'],
-                    "rekongition-custom-labels-dog-breed": 1,
-                    "rekongition-custom-labels-dog-breed-metadata": {
+                    "rekongition-custom-labels-brand-detection": 1,
+                    "rekongition-custom-labels-brand-detection-metadata": {
                         "confidence": 1,
                         "class-name": object[1],
                         "human-annotated": "yes",

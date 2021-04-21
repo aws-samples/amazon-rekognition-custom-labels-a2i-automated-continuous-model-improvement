@@ -32,8 +32,8 @@ def handler(event, context):
                     "WorkteamArn": response['Workteam']['WorkteamArn'],
                     "HumanTaskUiArn": responseData['HumanTaskUiArn'],
                     "TaskCount": 1,
-                    "TaskDescription": "Identify Dog Breed In Images",
-                    "TaskTitle": "Identify Dog Breed",
+                    "TaskDescription": "Identify Amazon Logo In Images",
+                    "TaskTitle": "Identify Amazon Logo",
                 },
                 OutputConfig={
                     "S3OutputPath": 's3://'+ event['ResourceProperties']['S3Bucket'] + '/a2i-human-loop-data/'

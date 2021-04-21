@@ -1,7 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: |
-  MLOps for Amazon Rekognition Custom Labels and Augmented AI with AWS Step Functions.
-  This Template MLOps around around Amazon Rekognition Custom Labels and Amazon Augmented AI (A2I) with AWS Step Functions and AWS System Manager Parameter Store backed by AWS Lambda.
+  This template deploys an automated and configurrable ML workflow around Amazon Rekognition Custom Labels and Amazon Augmented AI (A2I) with AWS Step Functions and AWS System Manager Parameter Store backed by AWS Lambda.
 Parameters:
   SNSEmail:
     Type: String
@@ -815,8 +814,8 @@ Mappings:
                         creation_date = image['LastModified'].strftime("%Y-%m-%dT%H:%M:%S.0000")
                         json_text = {
                             "source-ref": "s3://" + s3_bucket + "/" + image['Key'],
-                            "rekongition-custom-labels-dog-breed": 1,
-                            "rekongition-custom-labels-dog-breed-metadata": {
+                            "rekongition-custom-labels-brand-detection": 1,
+                            "rekongition-custom-labels-brand-detection-metadata": {
                                 "confidence": 1,
                                 "class-name": object[1],
                                 "human-annotated": "yes",
@@ -1086,8 +1085,8 @@ Mappings:
                             "WorkteamArn": response['Workteam']['WorkteamArn'],
                             "HumanTaskUiArn": responseData['HumanTaskUiArn'],
                             "TaskCount": 1,
-                            "TaskDescription": "Identify Dog Breed In Images",
-                            "TaskTitle": "Identify Dog Breed",
+                            "TaskDescription": "Identify Amazon Logo In Images",
+                            "TaskTitle": "Identify Amazon Logo",
                         },
                         OutputConfig={
                             "S3OutputPath": 's3://'+ event['ResourceProperties']['S3Bucket'] + '/a2i-human-loop-data/'
@@ -1340,14 +1339,14 @@ Mappings:
             <crowd-image-classifier
               name="crowd-image-classifier"
               src="{{ task.input.taskObject | grant_read_access }}"
-              header="Please Select Correct Dog Breed"
+              header="Please select the correct Amazon Logo"
               categories="['aws_logo', 'amazon_logo', 'wholefood_logo','None of the Above']"
             >
               <full-instructions header="Classification Instructions">
-                <p>Please select the correct dog breed for this image. Select None of Above if the image is not a dog or the dog breed cannot be identified.</p>
+                <p>Please select the correct Amazon logo for this image. Select None of Above if the image is not an Amazon logo cannot be identified.</p>
               </full-instructions>
               <short-instructions>
-                <p>Please select the correct dog breed for this image. Select None of Above if the image is not a dog or the dog breed cannot be identified..</p>
+                <p>Please select the correct Amazon logo for this image. Select None of Above if the image is not an Amazon logo cannot be identified..</p>
               </short-instructions>
             </crowd-image-classifier>
           </crowd-form>

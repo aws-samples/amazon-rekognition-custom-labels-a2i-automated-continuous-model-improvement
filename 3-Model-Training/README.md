@@ -1,7 +1,7 @@
 ## 3-Model-Training
 
 **Amazon Rekognition Custom Labels Model Training**  
-In this section we will walk through the steps to train and deploy a custom labels model. We will use the image folder name as label and the Lambda functions will create the training manifest accordingly. We will be using Amazon, AWS, and WholeFood logos to the model training and detection demo. The images are located in the "sample-images" folder.
+In this section we will walk through the steps to train and deploy a custom labels model. We will use the image folder name as label and the Lambda functions will create the training manifest accordingly. We will be using Amazon, AWS, and WholeFood logos for the model training and detection demo. The images are located in the "sample-images" folder.
 
 1. Go to [Amazon S3](https://s3.console.aws.amazon.com/s3/home) and select the bucket with name similar to "yourstackname-s3bucket-esxhty0wyhqu". You should see 5 folders:
   - a2i-human-loop-data/
