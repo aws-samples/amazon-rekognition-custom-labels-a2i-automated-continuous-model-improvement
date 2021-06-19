@@ -1,34 +1,33 @@
-## 6-Conclusions-Cleanup
+## 6 Conclusion and cleanup resources
 
 **Conclusions**  
-In this demo we demonstrated how to build an automated and configurable continuous model improvement workflow for  **Amazon Rekognition Custom Labels** and **Amazon Augmented AI (A2I)** with an iterative process to continuously monitor and retrain custom models to meet business objectives. We also demonstrated how to parameterized the workflow to provide flexibility without needing development rework.
+In this demo we explained how to build an automated and configurable continuous model improvement workflow for [Amazon Rekognition Custom Labels](https://aws.amazon.com/rekognition/custom-labels-features/) and [Amazon Augmented AI](https://aws.amazon.com/augmented-ai/) (Amazon A2I). By incorporating [Amazon Parameter Store](https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-parameter-store.html), we demonstrated how to use parameters as variables for [AWS Step Functions](https://aws.amazon.com/step-functions/) to customize the behaviors of the ML workflow without needing development rework. We walked through the steps to deploy the solution with [AWS CloudFormation](https://aws.amazon.com/cloudformation/) and completed an end-to-end process to train and deploy a Rekognition Custom Labels model, perform custom label detection, and create and complete Amazon A2I human labeling tasks.
 
 Things to consider to enhance this worfklow:
 - Add additional parameters to control the behaviors of this workflow.
 - Build a web interface for the Model Operator and Model Consumer for:
-  - Uploading images to **Amazon S3**
-  - Modifying **Amazon Systems Manager Parameter Store** values
-  - Fan out the **Amazon SNS** topic to integrate other **AWS** services
+  - Uploading images to [Amazon S3](https://aws.amazon.com/s3/)
+  - Modifying Parameter Store values
+  - Fan out the [Amazon Simple Notification Service](https://aws.amazon.com/sns/) (Amazon SNS) topic to integrate other AWS services
 
-**Cleanup**
-Please follow the steps below to cleanup the AWS resources that we created as part of this demo to avoid unnecessary charges.
+**Clean up**  
+Complete the following steps to clean up the AWS resources that we created as part of this post to avoid potential recurring charges.
 
-1. Go to [AWS CloudFormation](https://console.aws.amazon.com/cloudformation) and select stack for this demo.
-2. Select **Delete** to delete the stack. Some resources cannot be deleted by CloudFormation:
-  - Amazon S3 bucket
-  - Amazon Rekognition Custom Labels project (Charges apply to running models)
-  - Amazon SageMaker Ground Truth Private workforce (We created for you)
-3. (Optional) Delete Amazon S3 bucket
-  - Check the bucket name.
-  - Select **Empty** to empty the bucket.
-  - Select **Delete** to delete the bucket.
-4. (Optional) Delete Rekognition Custom Label project:
-  - Stop any running models
-    - Select the running model.
-    - In the "Evaluate and use model" tab, scroll down and expand the **API Code** section.
-    - Execute the **Stop model** **AWS** CLI command to stop the running model.
-  - Delete project
-    - Select the project and click **Delete** to delete the project and models.
-5. (Optional) Delete Amazon SageMaker Ground Truth Private workforce (We created for you):
-  - Execute the **AWS** ClI command below. Leave the workforce name ad default and replace the region with your region.   
+1. On the [CloudFormation](https://console.aws.amazon.com/cloudformation) console, choose the stack you used in this demo.
+2. Choose **Delete** to delete the stack.
+
+The following resources are not deleted by CloudFormation:
+  - S3 bucket
+  - Rekognition Custom Labels project
+  - [Amazon SageMaker Ground Truth](https://aws.amazon.com/sagemaker/groundtruth/) private workforce
+
+3. On the S3 console, choose the bucket you used for this post.
+4. Choose **Empty**.
+5. Choose **Delete**
+6. On the Rekognition Custom Label console, choose the running model.
+7. On the **Evaluate and use model** tab, expand the **API Code** section.
+8. Run the [AWS Command Line Interface](http://aws.amazon.com/cli) (AWS CLI) stop model command.
+9.	On the **Projects** page, select the project and choose **Delete**.
+10.	To delete the private workforce, enter the following code (leave the workforce name as `default` and provide your Region):  
+
   `aws sagemaker delete-workforce --workforce-name default --region your-region-x`
