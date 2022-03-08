@@ -50,6 +50,8 @@ We use Parameter Store in two different ways. Firstly, we provide a set of seven
 
 We use two EventBridge rules to initiate Step Functions state machine runs. The first rule is based on a Systems Manager event pattern. The Systems Manager rule is triggered by changes to the Parameter Store and initiates the state machine to invoke a Lambda function to apply changes to the impacted resources. The second rule is a schedule rule. The schedule rule is triggered periodically to initiate the state machine to invoke a Lambda function to check for new model training.
 
+We use an [Amazon DynamoDB](https://aws.amazon.com/dynamodb/) NoSQL database to log all Rekognition and A2I events and results for performance analysis and model drift detection. Although we did NOT include an analytics feature in this example,  you can quickly deploy [Amazon QuickSight](https://aws.amazon.com/quicksight/) with the DynamoDB table as your source to visualize the performance of your model over time.
+
 We use a Step Functions state machine to orchestrate the ML workflow. The state machine initiates different processes based on events received from EventBridge and responses from Lambda. In addition, the state machine uses an internal process such as Wait to wait for model training and deployment to complete and Choice to evaluate for next tasks.
 
 We use an S3 bucket and a set of predefined folders to store training and inference images and model artifacts. Each folder has a dedicated purpose. The model operator uploads new images to the folder images_labeled_by_folder for training, and the model consumer uploads inference images to the folder images_for_detection for custom label detection.
@@ -57,7 +59,7 @@ We use an S3 bucket and a set of predefined folders to store training and infere
 We use three different sets of Lambda functions:
 
 - The first set consists of two Lambda functions that build the Rekognition Custom Labels project and Amazon A2I human flow definition. These two Lambda functions are only used initially as part of the CloudFormation stack deployment process.
-- The second set of Lambda functions are invoked by the state machine to run Amazon Rekognition and Amazon A2I APIs, create a manifest file for training, collect labeled images for training, and manage system resources.
+- The second set of Lambda functions are invoked by the state machine to run Amazon Rekognition, A2I & DynamoDB APIs, create a manifest file for training, collect labeled images for training, and manage system resources.
 - The last set is a single Lambda function to redirect S3 PutObject events to the state machine.
 
 We use [Amazon Simple Notification Service](https://aws.amazon.com/sns/) (Amazon SNS) as a communication mechanism to alert the model operator and model consumer of relevant model training and detection events. All SNS messages are published by the corresponding Lambda functions.
