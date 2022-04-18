@@ -19,6 +19,6 @@
 
 - You need to initialize Rekognition Custom Labels for your selected Region before you can use Rekognition Custom Labels. On the Rekognition Custom Labels console, choose **Projects** in the navigation pane and take one of the following actions:
  - If you see the **Projects** page with or without projects, then your Region is initialized.
- - If you’re prompted with a message for first-time setup, follow the instructions to create the default [Amazon Simple Storage Service](http://aws.amazon.com/s3) (Amazon S3) bucket. We don’t use the default S3 bucket with this solution, but it’s part of the Rekognition Custom Labels initialization process.
+ - If you’re prompted with a message for first-time setup, follow the instructions to create the default [Amazon Simple Storage Service](https://aws.amazon.com/s3) (Amazon S3) bucket. We don’t use the default S3 bucket with this solution, but it’s part of the Rekognition Custom Labels initialization process.
 
 Next Step: [Deployment](../1-Deployment/)

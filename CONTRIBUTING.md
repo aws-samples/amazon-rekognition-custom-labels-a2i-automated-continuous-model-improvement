@@ -49,7 +49,7 @@ This project has adopted the [Amazon Open Source Code of Conduct](https://aws.gi
 
 ## Security issue notifications
 
-If you discover a potential security issue, please notify AWS Security via our [vulnerability reporting page](http://aws.amazon.com/security/vulnerability-reporting/). Please do **not** create a public issue on GitHub.
+If you discover a potential security issue, please notify AWS Security via our [vulnerability reporting page](https://aws.amazon.com/security/vulnerability-reporting/). Please do **not** create a public issue on GitHub.
 
 ## Licensing
 

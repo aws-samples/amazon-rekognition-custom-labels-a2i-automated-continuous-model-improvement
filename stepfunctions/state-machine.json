@@ -12,11 +12,6 @@
         },
         {
           "Variable": "$.source",
-          "StringEquals": "aws.events",
-          "Next": "Rekongition Model"
-        },
-        {
-          "Variable": "$.source",
           "StringEquals": "s3-detection-event",
           "Next": "Rekongition Detection"
         },
@@ -24,6 +19,16 @@
           "Variable": "$.source",
           "StringEquals": "s3-a2i-event",
           "Next": "A2I HumanLoop Data"
+        },
+        {
+          "Variable": "$.resources[0]",
+          "StringMatches": "arn:aws:events:*-scheduled-poll",
+          "Next": "Rekongition Model"
+        },
+        {
+          "Variable": "$.resources[0]",
+          "StringMatches": "arn:aws:events:*-sampling-poll",
+          "Next": "Human Sampling"
         }
       ],
       "Default": "Unknown Event"
@@ -158,12 +163,12 @@
       "Type": "Choice",
       "Choices": [
         {
-          "Variable": "$.message.A2I",
-          "IsPresent": true,
-          "Next": "Failed Confidence"
+          "Variable": "$.message.NextTask",
+          "StringEquals": "End",
+          "Next": "Pass Confidence"
         }
       ],
-      "Default": "Pass Confidence"
+      "Default": "Failed Confidence"
     },
     "Failed Confidence": {
       "Type": "Pass",
@@ -173,7 +178,7 @@
       "Type": "Choice",
       "Choices": [
         {
-          "Variable": "$.message.A2I",
+          "Variable": "$.message.Task.UserSettings.EnableA2IWorkflow",
           "BooleanEquals": true,
           "Next": "Create HumanLoop"
         }
@@ -200,6 +205,34 @@
     "Add Training Image": {
       "Type": "Pass",
       "End": true
+    },
+    "Human Sampling": {
+      "Type": "Pass",
+      "Next": "Check Last Sample"
+    },
+    "Check Last Sample": {
+      "Type": "Task",
+      "Resource": "${LambdaCheckHumanSampling}",
+      "Next": "Check Sampling Interval"
+    },
+    "Check Sampling Interval": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.message.NextTask",
+          "StringEquals": "End",
+          "Next": "No New Sample"
+        }
+      ],
+      "Default": "Create Human Sample"
+    },
+    "Create Human Sample": {
+      "Type": "Wait",
+      "Seconds": 5,
+      "Next": "Check Last Sample"
+    },
+    "No New Sample": {
+      "Type": "Succeed"
     },
     "Failure": {
       "Type": "Fail"

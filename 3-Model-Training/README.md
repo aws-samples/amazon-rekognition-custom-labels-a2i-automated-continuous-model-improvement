@@ -6,7 +6,7 @@ Rekognition Custom Labels supports two methods of labeling datasets: [object-lev
 
 We use Amazon and AWS logos for our initial training images. The images are located in the `sample-images` folder. We use the folder name as the label such that images in the **amazon_logo** and **aws_logo** folders are labeled `amazon_log` and `aws_logo`, respectively.
 
-In this section, we walk you through the steps to add training images to [Amazon Simple Storage Service](http://aws.amazon.com/s3) (Amazon S3)  and explain how the automatic model training process works.
+In this section, we walk you through the steps to add training images to [Amazon Simple Storage Service](https://aws.amazon.com/s3) (Amazon S3)  and explain how the automatic model training process works.
 
 1. On the [Amazon S3](https://s3.console.aws.amazon.com/s3/home) console, choose the bucket with the name similar to `yourstackname-s3bucket-esxhty0wyhqu`.  and select the bucket with name similar to "yourstackname-s3bucket-esxhty0wyhqu". You should see 5 folders:
   - a2i-human-loop-data/

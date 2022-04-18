@@ -92,15 +92,31 @@ Resources:
               ]
             }
   DyanmoDBInferenceA2ILogs:
+    DeletionPolicy: Retain
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "rekognition-a2i-logs"]]
       AttributeDefinitions:
         - AttributeName: "DetectLabelRequestId"
+          AttributeType: "S"
+        - AttributeName: "DetectLabelDate"
+          AttributeType: "S"
+        - AttributeName: "Sampled"
           AttributeType: "S"
       KeySchema:
         - AttributeName: "DetectLabelRequestId"
           KeyType: "HASH"
+      GlobalSecondaryIndexes:
+        - IndexName: "Sampled_GSI"
+          KeySchema:
+            - AttributeName: "Sampled"
+              KeyType: "HASH"
+            - AttributeName: "DetectLabelDate"
+              KeyType: "RANGE"
+          Projection:
+            ProjectionType: "KEYS_ONLY"
+          ProvisionedThroughput:
+            ReadCapacityUnits: 5
+            WriteCapacityUnits: 5
       ProvisionedThroughput:
         ReadCapacityUnits: 5
         WriteCapacityUnits: 5
@@ -180,7 +196,8 @@ Resources:
             Action:
               - dynamodb:PutItem
               - dynamodb:UpdateItem
-            Resource: !GetAtt  DyanmoDBInferenceA2ILogs.Arn
+              - dynamodb:Query
+            Resource: !Join ["",[!GetAtt DyanmoDBInferenceA2ILogs.Arn, "*"]]
           - Effect: Allow
             Action:
               - ssm:GetParameter*
@@ -337,6 +354,19 @@ Resources:
       Environment:
         Variables:
           parameter_store_path: !Join ["/", ["",!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], ""]]
+  LambdaHumanSampling:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "create-human-sampling"]]
+      Code:
+        ZipFile: !FindInMap [Lambda, CodeBlock, LambdaHumanSampling]
+      Handler: !FindInMap [Lambda, Settings, Handler]
+      Runtime: !FindInMap [Lambda, Settings, Runtime]
+      Timeout: !FindInMap [Lambda, Settings, Timeout]
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          parameter_store_path: !Join ["/", ["",!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], ""]]
   LambdaS3EventTriggerPermission:
     Type: AWS::Lambda::Permission
     Properties:
@@ -383,6 +413,7 @@ Resources:
               - !GetAtt LambdaRekognitionDetectLabel.Arn
               - !GetAtt LambdaA2ICreateHumanLoop.Arn
               - !GetAtt LambdaA2IHumanLoopData.Arn
+              - !GetAtt LambdaHumanSampling.Arn
   StepFunctionsProjectStateMachine:
     Type: AWS::StepFunctions::StateMachine
     Properties:
@@ -396,6 +427,7 @@ Resources:
         LambdaRekognitionDetectLabel: !GetAtt LambdaRekognitionDetectLabel.Arn
         LambdaA2ICreateHumanLoop: !GetAtt LambdaA2ICreateHumanLoop.Arn
         LambdaA2IHumanLoopData: !GetAtt LambdaA2IHumanLoopData.Arn
+        LambdaCheckHumanSampling: !GetAtt LambdaHumanSampling.Arn
       RoleArn: !GetAtt StepFunctionsRole.Arn
   ParameterSystemVariables:
     Type: AWS::SSM::Parameter
@@ -407,12 +439,14 @@ Resources:
         {
           "s3_bucket": "${S3Bucket}",
           "events_scheduled_rule": "${EventsRuleScheduledPoll}",
+          "sampling_scheduled_rule": "${EventsRuleSamplingPoll}",
           "rekognition_project_arn": "${RekognitionProjectAssets.ProjectArn}",
           "sns-topic": "${SNSTopicRekognition}",
           "state_machine_arn": "${StepFunctionsProjectStateMachine}",
           "previous_trained_images": 0,
           "a2i_workflow": false,
-          "dynamodb_table": "${DyanmoDBInferenceA2ILogs}"
+          "dynamodb_table": "${DyanmoDBInferenceA2ILogs}",
+          "dynamodb_table_GSI": "Sampled_GSI"
         }
   ParameterAutoModelTraining:
     Type: AWS::SSM::Parameter
@@ -427,7 +461,7 @@ Resources:
       Description: This is the polling frequency (in integer minutes) on how often the Amazon Step Functions state machine is triggered to initiate the check for automatic model training. As you update this value, the value is applied to the Amazon EventBridge schedule rule by a Lambda function.
       Name: !Join ["/", ["", !Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "Automatic-Training-Poll-Frequency"]]
       Type: String
-      Value: 600
+      Value: 720
   ParameterMinimumF1Score:
     Type: AWS::SSM::Parameter
     Properties:
@@ -459,10 +493,31 @@ Resources:
   ParameterMinimumInferenceUnits:
     Type: AWS::SSM::Parameter
     Properties:
-      Description: This value (Int 1-5), with a minimum of 1, inference unit to use for the running Rekognition Customs Label model. A single inference unit represents 1 hour of processing and can support up to 5 Transaction Pers Second (TPS). Use a higher number to increase the TPS throughput of your model. You are charged for the number of inference units that you use.
+      Description: This value (Int 1-5), with a minimum of 1, inference unit to use for the running Rekognition Customs Labelsmodel. A single inference unit represents 1 hour of processing and can support up to 5 Transaction Pers Second (TPS). Use a higher number to increase the TPS throughput of your model. You are charged for the number of inference units that you use.
       Name: !Join ["/", ["", !Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "Minimum-Inference-Units"]]
       Type: String
       Value: 1
+  ParameterAutoHumanSampling:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Description: This value (true/false) determines whether automatic human sampling is enabled/disabled. When this value is updated to true, a Lambda function enables the EventBride Schedule rule. When the value is updated to false, a Lambda function disables the EventBride Schedule rule.
+      Name: !Join ["/", ["", !Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "Enable-Automatic-Human-Sampling"]]
+      Type: String
+      Value: true
+  ParameterAutoHumanSamplingPollFrequency:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Description: This is the polling frequency (in integer minutes) on how often the Amazon EventBridge Schedule rule is triggered to initiate the check for human sampling. As you update this value, the value is applied to the rule by an AWS Lambda function.
+      Name: !Join ["/", ["", !Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "Automatic-Human-Sampling-Frequency"]]
+      Type: String
+      Value: 720
+  ParameterHumanSamplingInternval:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Description:  This value (Int) represents the minimum number of new Rekognition Custom Labelsdetections since the last human sampled detection before a new human sample is needed. If a new detection meets the interval requirement, it is marked for human sampling. An Amazon A2I human workflow is created, if a human workflow does not exist already.
+      Name: !Join ["/", ["", !Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "Human-Sampling-Interval"]]
+      Type: String
+      Value: 1000
   EventsTriggerRole:
     Type: AWS::IAM::Role
     Properties:
@@ -491,6 +546,15 @@ Resources:
         - Arn: !Ref StepFunctionsProjectStateMachine
           Id: !GetAtt StepFunctionsProjectStateMachine.Name
           RoleArn: !GetAtt EventsTriggerRole.Arn
+  EventsRuleSamplingPoll:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Join ["-", [!Ref AWS::StackName, !Select [6, !Split ['-', !Ref AWS::StackId]], "sampling-poll"]]
+      ScheduleExpression: rate(600 minutes)
+      Targets:
+        - Arn: !Ref StepFunctionsProjectStateMachine
+          Id: !GetAtt StepFunctionsProjectStateMachine.Name
+          RoleArn: !GetAtt EventsTriggerRole.Arn
   EventsRuleParameterStore:
     Type: AWS::Events::Rule
     Properties:
@@ -502,7 +566,9 @@ Resources:
           "detail": {
             "name": [
               "${ParameterAutoModelTrainingPollFrequency}",
-              "${ParameterAutoModelTraining}"
+              "${ParameterAutoHumanSamplingPollFrequency}",
+              "${ParameterAutoModelTraining}",
+              "${ParameterAutoHumanSampling}"
             ],
             "operation": ["Update"]
           }
@@ -643,7 +709,7 @@ Outputs:
 Mappings:
   Lambda:
     Settings:
-      Runtime: python3.8
+      Runtime: python3.9
       Timeout: 15
       Handler: index.handler
     CodeBlock:
@@ -714,16 +780,11 @@ Mappings:
         ssm = boto3.client('ssm')
         events = boto3.client('events')
         sns = boto3.client('sns')
-        def get_parameters():
-            response = ssm.get_parameters_by_path(
-                Path=os.environ['parameter_store_path'],
-                Recursive=True
+        def get_parameter(name):
+            response = ssm.get_parameter(
+                Name=os.environ['parameter_store_path']+name
             )
-            parameter_store = {}
-            for parameter in response['Parameters']:
-                parameter_name = (parameter['Name'].split('/'))[-1]
-                parameter_store[parameter_name] = parameter['Value']
-            return parameter_store
+            return json.loads(response['Parameter']['Value'])
         def publish_message(sns_subject, sns_message, topic_arn):
             response = sns.publish(
                 TopicArn=topic_arn,
@@ -731,22 +792,39 @@ Mappings:
                 Subject=sns_subject
             )
         def handler(event, context):
-            parameter_store = get_parameters()
-            sys_vars = json.loads(parameter_store['For-System-Use-Only'])
+            sys_vars = get_parameter('For-System-Use-Only')
             if 'Automatic-Training-Poll-Frequency' in event['detail']['name']:
                 resource = sys_vars['events_scheduled_rule']
-                value = 'rate(' + parameter_store['Automatic-Training-Poll-Frequency'] + ' minutes)'
-                response = events.put_rule(Name=resource, ScheduleExpression=value)
+                value = 'rate(' + str(get_parameter('Automatic-Training-Poll-Frequency')) + ' minutes)'
+                events_response = events.put_rule(Name=resource, ScheduleExpression=value)
+            elif 'Automatic-Human-Sampling-Frequency' in event['detail']['name']:
+                resource = sys_vars['sampling_scheduled_rule']
+                value = 'rate(' + str(get_parameter('Automatic-Human-Sampling-Frequency')) + ' minutes)'
+                events_response = events.put_rule(Name=resource, ScheduleExpression=value)
             elif 'Enable-Automatic-Training' in event['detail']['name']:
                 resource = sys_vars['events_scheduled_rule']
-                if parameter_store['Enable-Automatic-Training'] in ['True', 'true', 'TRUE']:
-                    value = 'Enabled'
-                    response = events.enable_rule(Name=resource)
+                value = str(get_parameter('Enable-Automatic-Training'))
+                if value in ['True', 'true', 'TRUE']:
+                    events_response = events.enable_rule(Name=resource)
                 else:
-                    response = events.disable_rule(Name=resource)
-                    value = 'Disabled'
-            publish_message('Parameter Applied '+resource, json.dumps(response), sys_vars['sns-topic'])
-            response = {'NextTask': 'End', 'Value': value , 'Resource': resource, 'Response': response, 'Event': event }
+                    events_response = events.disable_rule(Name=resource)
+            elif 'Enable-Automatic-Human-Sampling' in event['detail']['name']:
+                resource = sys_vars['sampling_scheduled_rule']
+                value = str(get_parameter('Enable-Automatic-Human-Sampling'))
+                if value in ['True', 'true', 'TRUE']:
+                    events_response = events.enable_rule(Name=resource)
+                else:
+                    events_response = events.disable_rule(Name=resource)
+            response = {
+                'NextTask': 'End',
+                'Task': {
+                    'Details': 'Parameter Applied',
+                    'Parameter': event['detail']['name'],
+                    'NewValue': value
+                },
+                'ResponseMetadata': events_response['ResponseMetadata']
+            }
+            publish_message('Parameter Store Event', json.dumps(response), sys_vars['sns-topic'])
             return {
                 'message': response
             }
@@ -758,16 +836,11 @@ Mappings:
         s3_resource = boto3.resource('s3')
         sns = boto3.client('sns')
         rekognition = boto3.client('rekognition')
-        def get_parameters():
-            response = ssm.get_parameters_by_path(
-                Path=os.environ['parameter_store_path'],
-                Recursive=True
+        def get_parameter(name):
+            response = ssm.get_parameter(
+                Name=os.environ['parameter_store_path']+name
             )
-            parameter_store = {}
-            for parameter in response['Parameters']:
-                parameter_name = (parameter['Name'].split('/'))[-1]
-                parameter_store[parameter_name] = parameter['Value']
-            return parameter_store
+            return json.loads(response['Parameter']['Value'])
         def publish_message(sns_subject, sns_message, topic_arn):
             response = sns.publish(
                 TopicArn=topic_arn,
@@ -775,11 +848,11 @@ Mappings:
                 Subject=sns_subject
             )
         def handler(event, context):
-            parameter_store = get_parameters()
-            sys_vars = json.loads(parameter_store['For-System-Use-Only'])
-            del parameter_store['For-System-Use-Only']
+            sys_vars = get_parameter('For-System-Use-Only')
             next_task = 'End'
-            if parameter_store['Enable-Automatic-Training'] in ['True', 'true', 'TRUE']:
+            enable_automatic_training = str(get_parameter('Enable-Automatic-Training'))
+            minimum_untrained_images = int(get_parameter('Minimum-Untrained-Images'))
+            if enable_automatic_training in ['True', 'true', 'TRUE']:
                 s3_bucket = sys_vars['s3_bucket']
                 bucket = s3_resource.Bucket(s3_bucket)
                 image_count = -1
@@ -787,7 +860,7 @@ Mappings:
                     image_count += 1
                 trained_image = int(sys_vars['previous_trained_images'])
                 untrained_images = image_count - trained_image
-                if untrained_images >= int(parameter_store['Minimum-Untrained-Images']):
+                if untrained_images >= minimum_untrained_images:
                     project_arn = sys_vars['rekognition_project_arn']
                     response = rekognition.describe_project_versions(ProjectArn=project_arn)
                     next_task = 'CreateManifest'
@@ -801,8 +874,20 @@ Mappings:
                     task_details =  'Minimum Number Untrained Images Condition Not Met'
             else:
                 task_details =  'Autmatic training option is disabled'
-            response = {'NextTask': next_task, 'Task': {'Details': task_details}, 'UserSettings': parameter_store, 'Project': sys_vars}
-            publish_message('Checked for Automatic Model Training', task_details, sys_vars['sns-topic'])
+                untrained_images = 'NA'
+            response = {
+                'NextTask': next_task,
+                'Task': {
+                    'Details': task_details,
+                    'UntrainedImages': untrained_images,
+                    'UserSettings': {
+                        'EnableAutomaticTraining': enable_automatic_training,
+                        'MinimumUntrainedImages': minimum_untrained_images
+                    }
+                },
+                'SystemVariables': sys_vars
+            }
+            publish_message('Check for Automatic Model Training', json.dumps(response), sys_vars['sns-topic'])
             return {
                 'message': response
             }
@@ -811,10 +896,16 @@ Mappings:
         import boto3
         import os
         import datetime
+        ssm = boto3.client('ssm')
         s3 = boto3.client('s3')
         paginator = s3.get_paginator('list_objects_v2')
         s3_resource = boto3.resource('s3')
         sns = boto3.client('sns')
+        def get_parameter(name):
+            response = ssm.get_parameter(
+                Name=os.environ['parameter_store_path']+name
+            )
+            return json.loads(response['Parameter']['Value'])
         def publish_message(sns_subject, sns_message, topic_arn):
             response = sns.publish(
                 TopicArn=topic_arn,
@@ -822,7 +913,8 @@ Mappings:
                 Subject=sns_subject
             )
         def handler(event, context):
-            s3_bucket = event['message']['Project']['s3_bucket']
+            sys_vars = get_parameter('For-System-Use-Only')
+            s3_bucket = sys_vars['s3_bucket']
             image_count = 0
             pages = paginator.paginate(Bucket=s3_bucket)
             f = open("/tmp/manifest.txt", "a")
@@ -830,28 +922,29 @@ Mappings:
                 for image in page['Contents']:
                     object = image['Key'].split("/")
                     if len(object) == 3 and object[0] == 'images_labeled_by_folder':
-                        creation_date = image['LastModified'].strftime("%Y-%m-%dT%H:%M:%S.0000")
-                        json_text = {
-                            "source-ref": "s3://" + s3_bucket + "/" + image['Key'],
-                            "rekongition-custom-labels-brand-detection": 1,
-                            "rekongition-custom-labels-brand-detection-metadata": {
-                                "confidence": 1,
-                                "class-name": object[1],
-                                "human-annotated": "yes",
-                                "creation-date": creation_date,
-                                "type": "groundtruth/image-classification"
+                        if object[2] != '':
+                            creation_date = image['LastModified'].strftime("%Y-%m-%dT%H:%M:%S.0000")
+                            json_text = {
+                                "source-ref": "s3://" + s3_bucket + "/" + image['Key'],
+                                "rekongition-custom-labels-brand-detection": 1,
+                                "rekongition-custom-labels-brand-detection-metadata": {
+                                    "confidence": 1,
+                                    "class-name": object[1],
+                                    "human-annotated": "yes",
+                                    "creation-date": creation_date,
+                                    "type": "groundtruth/image-classification"
+                                }
                             }
-                        }
-                        json_object = json.dumps(json_text)
-                        f.write(json_object + '\n')
-                        image_count += 1
+                            json_object = json.dumps(json_text)
+                            f.write(json_object + '\n')
+                            image_count += 1
             f.close()
             file_name = 'manifests/groundtruth-' + datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S") + '.manifest'
             s3_resource.meta.client.upload_file('/tmp/manifest.txt', s3_bucket, file_name)
             response = event['message']
             response['NextTask'] = 'CreateProjectVersion'
             response['Task'] = {'Manifest':  file_name, 'TotalImages': image_count}
-            publish_message('New Training Manifest Created', json.dumps(response['Task']), event['message']['Project']['sns-topic'])
+            publish_message('New Training Manifest Created', json.dumps(response), sys_vars['sns-topic'])
             return {
                 'message': response
             }
@@ -863,6 +956,11 @@ Mappings:
         ssm = boto3.client('ssm')
         rekognition = boto3.client('rekognition')
         sns = boto3.client('sns')
+        def get_parameter(name):
+            response = ssm.get_parameter(
+                Name=os.environ['parameter_store_path']+name
+            )
+            return json.loads(response['Parameter']['Value'])
         def publish_message(sns_subject, sns_message, topic_arn):
             response = sns.publish(
                 TopicArn=topic_arn,
@@ -871,8 +969,8 @@ Mappings:
             )
         def handler(event, context):
             response = event['message']
-            project_arn = event['message']['Project']['rekognition_project_arn']
-            s3_bucket = event['message']['Project']['s3_bucket']
+            project_arn = event['message']['SystemVariables']['rekognition_project_arn']
+            s3_bucket = event['message']['SystemVariables']['s3_bucket']
             if event['message']['NextTask'] == 'CreateProjectVersion':
                 version_name = datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")
                 rekognition_response = rekognition.create_project_version(
@@ -892,7 +990,8 @@ Mappings:
                 if status in ['TRAINING_IN_PROGRESS', 'STARTING']:
                     next_task = 'DescribeProjectVersions'
                 elif status == 'TRAINING_COMPLETED':
-                    if rekognition_response['ProjectVersionDescriptions'][0]['EvaluationResult']['F1Score'] >= float(event['message']['UserSettings']['Minimum-F1-Score']):
+                    minimum_f1_score = float(get_parameter('Minimum-F1-Score'))
+                    if rekognition_response['ProjectVersionDescriptions'][0]['EvaluationResult']['F1Score'] >= minimum_f1_score:
                         next_task = 'StartProjectVersion'
                     else:
                         next_task = 'FailedF1Evaluation'
@@ -901,18 +1000,18 @@ Mappings:
                     next_task = 'ModelRunning'
                 else:
                     next_task = 'FAILED'
-                publish_message('Rekognition Model Status', 'Status: '+status+'\n'+json.dumps(response['Task']), event['message']['Project']['sns-topic'])
+                publish_message('Rekognition Model Status', 'Status: '+status+'\n'+json.dumps(response), event['message']['SystemVariables']['sns-topic'])
             elif event['message']['NextTask'] == 'StartProjectVersion':
                 project_version_arn = event['message']['Task']['ProjectVersionArn']
-                min_inteference_unit = int(event['message']['UserSettings']['Minimum-Inference-Units'])
+                min_inteference_unit = int(get_parameter('Minimum-Inference-Units'))
                 rekognition_response = rekognition.start_project_version(ProjectVersionArn=project_version_arn, MinInferenceUnits=min_inteference_unit)
                 next_task = 'DescribeProjectVersions'
             elif event['message']['NextTask'] == 'ModelRunning':
                 parameter_name = os.environ['parameter_store_path']+'For-System-Use-Only'
                 project_version_arn = event['message']['Task']['ProjectVersionArn']
-                event['message']['Project']['rekognition_project_version_arn'] = project_version_arn
-                event['message']['Project']['previous_trained_images'] = event['message']['Task']['TotalImages']
-                ssm_response = ssm.put_parameter(Name=parameter_name, Value=json.dumps(event['message']['Project']), Type='String',Overwrite=True)
+                event['message']['SystemVariables']['rekognition_project_version_arn'] = project_version_arn
+                event['message']['SystemVariables']['previous_trained_images'] = event['message']['Task']['TotalImages']
+                ssm_response = ssm.put_parameter(Name=parameter_name, Value=json.dumps(event['message']['SystemVariables']), Type='String',Overwrite=True)
                 rekognition_response = rekognition.describe_project_versions(ProjectArn=project_arn)
                 for project_version in rekognition_response['ProjectVersionDescriptions']:
                     if project_version['Status'] == 'RUNNING' and project_version['ProjectVersionArn'] != project_version_arn:
@@ -932,16 +1031,11 @@ Mappings:
         sns = boto3.client('sns')
         rekognition = boto3.client('rekognition')
         dynamodb = boto3.client('dynamodb')
-        def get_parameters():
-            response = ssm.get_parameters_by_path(
-                Path=os.environ['parameter_store_path'],
-                Recursive=True
+        def get_parameter(name):
+            response = ssm.get_parameter(
+                Name=os.environ['parameter_store_path']+name
             )
-            parameter_store = {}
-            for parameter in response['Parameters']:
-                parameter_name = (parameter['Name'].split('/'))[-1]
-                parameter_store[parameter_name] = parameter['Value']
-            return parameter_store
+            return json.loads(response['Parameter']['Value'])
         def store_detection_results(dynamodb_table, detectlabel_request_id, detectlabel_date, s3_bucket_name, s3_object_key, s3_object_eTag, project_version, detected_label, confidence_level, minimum_confidence_level, A2I):
             response = dynamodb.put_item(
                 TableName=dynamodb_table,
@@ -952,10 +1046,11 @@ Mappings:
                     'S3ObjectKey': {'S':s3_object_key},
                     'S3ObjectEtag': {'S':s3_object_eTag},
                     'ProjectVersionArn': {'S':project_version},
-                    'DectectedLabel': {'S':detected_label},
+                    'DetectedLabel': {'S':detected_label},
                     'DetectedConfidenceLevel': {'N':str(confidence_level)},
                     'MinimumConfidenceLevel': {'N':str(minimum_confidence_level)},
-                    'A2IEnabled': {'BOOL':A2I}
+                    'A2IEnabled': {'BOOL':A2I},
+                    'Sampled': {'S':'No'}
                 }
             )
         def publish_message(sns_subject, sns_message, topic_arn):
@@ -965,17 +1060,15 @@ Mappings:
                 Subject=sns_subject
             )
         def handler(event, context):
-            parameter_store = get_parameters()
-            a2i = True if parameter_store['Enable-A2I-Workflow'].lower().capitalize() == 'True' else False
-            sys_vars = json.loads(parameter_store['For-System-Use-Only'])
+            sys_vars = get_parameter('For-System-Use-Only')
             project_version = sys_vars['rekognition_project_version_arn']
             dynamodb_table = sys_vars['dynamodb_table']
-            minimum_confidence_level=parameter_store['Minimum-Label-Detection-Confidence']
+            minimum_confidence_level= float(get_parameter('Minimum-Label-Detection-Confidence'))
             s3_bucket_name=event['s3event']['s3']['bucket']['name']
             s3_object_key=event['s3event']['s3']['object']['key']
             s3_object_eTag=event['s3event']['s3']['object']['eTag']
             s3_event_time=event['s3event']['eventTime']
-            response = rekognition.detect_custom_labels(
+            rekognition_response = rekognition.detect_custom_labels(
                 ProjectVersionArn=project_version,
                 Image={
                     'S3Object': {
@@ -986,14 +1079,36 @@ Mappings:
                 MaxResults=1,
                 MinConfidence=0
             )
-            confidence_level = response['CustomLabels'][0]['Confidence']
-            detected_label = response['CustomLabels'][0]['Name']
-            detectlabel_request_id = response['ResponseMetadata']['RequestId']
-            if confidence_level < float(parameter_store['Minimum-Label-Detection-Confidence']): 
-                response['A2I'] = True if a2i else False
+            confidence_level = rekognition_response['CustomLabels'][0]['Confidence']
+            detected_label = rekognition_response['CustomLabels'][0]['Name']
+            detectlabel_request_id = rekognition_response['ResponseMetadata']['RequestId']
+            a2i = get_parameter('Enable-A2I-Workflow')
+            if confidence_level <  minimum_confidence_level:
+                next_task = 'A2I'
+                task_details = 'Detection Fail Minimum Confidence Level'
+            else:
+                next_task = 'End'
+                task_details = 'Detection Pass Minimum Confidence Level'
             store_detection_results(dynamodb_table, detectlabel_request_id, s3_event_time, s3_bucket_name, s3_object_key, s3_object_eTag, project_version, detected_label, confidence_level, minimum_confidence_level, a2i)
-            publish_message('Rekgnition Custom Labels Detection Invoked', json.dumps(response), sys_vars['sns-topic'])
-            response['s3event'] = event['s3event']
+            response = {
+                'NextTask': next_task,
+                'Task': {
+                    'Details': task_details,
+                    'DetectedLabel': detected_label,
+                    'DetectedConfidenceLevel': confidence_level,
+                    'S3Object': {
+                        'Bucket': s3_bucket_name,
+                        'Name': s3_object_key
+                    },
+                    'UserSettings': {
+                        'EnableA2IWorkflow': a2i,
+                        'MinimumConfidenceLevel': minimum_confidence_level
+                    }
+                },
+                'SystemVariables': sys_vars,
+                'ResponseMetadata': rekognition_response['ResponseMetadata']
+            }
+            publish_message('Rekognition Detect Custome Label', json.dumps(response), sys_vars['sns-topic'])
             return {
                 'message': response
             }
@@ -1006,10 +1121,11 @@ Mappings:
         a2i = boto3.client('sagemaker-a2i-runtime')
         ssm = boto3.client('ssm')
         dynamodb = boto3.client('dynamodb')
-        def get_parameter(parameter_name):
-            response = ssm.get_parameter(Name=parameter_name)
-            parameter_value = json.loads(response['Parameter']['Value'])
-            return parameter_value
+        def get_parameter(name):
+            response = ssm.get_parameter(
+                Name=os.environ['parameter_store_path']+name
+            )
+            return json.loads(response['Parameter']['Value'])
         def publish_message(sns_subject, sns_message, topic_arn):
             response = sns.publish(
                 TopicArn=topic_arn,
@@ -1033,30 +1149,44 @@ Mappings:
                 UpdateExpression='SET #HLN=:n, #HLRI=:i'
             )
         def handler(event, context):
-            parameter_name = os.environ['parameter_store_path'] + 'For-System-Use-Only'
-            sys_vars = get_parameter(parameter_name)
+            sys_vars = get_parameter('For-System-Use-Only')
             dynamodb_table = sys_vars['dynamodb_table']
             detectlabel_request_id=event['message']['ResponseMetadata']['RequestId']
-            s3_bucket_name=event['message']['s3event']['s3']['bucket']['name']
-            s3_object_key=event['message']['s3event']['s3']['object']['key']
-            detected_label=event['message']['CustomLabels'][0]['Name']
-            confidence_level=event['message']['CustomLabels'][0]['Confidence']
+            s3_bucket_name=event['message']['Task']['S3Object']['Bucket']
+            s3_object_key=event['message']['Task']['S3Object']['Name']
+            detected_label=event['message']['Task']['DetectedLabel']
+            detected_confidence_level=event['message']['Task']['DetectedConfidenceLevel']
             human_loop_name=str(uuid.uuid4())
-            response = a2i.start_human_loop(
+            a2i_response = a2i.start_human_loop(
                 HumanLoopName = human_loop_name,
                 FlowDefinitionArn = sys_vars['flow_definition_arn'],
                 HumanLoopInput = {
                     'InputContent': json.dumps({
-                        'initialValue': confidence_level,
+                        'source': 'A2I Workflow',
                         'detectLabelRequestId': detectlabel_request_id,
+                        'detectedConfidenceLevel': detected_confidence_level,
+                        'detectedLabel': detected_label,
                         'taskObject': 's3://'+s3_bucket_name+'/'+s3_object_key
                     })
                 }
             )
-            humanloop_request_id=response['ResponseMetadata']['RequestId']
+            humanloop_request_id=a2i_response['ResponseMetadata']['RequestId']
             append_a2i_request(dynamodb_table, detectlabel_request_id, human_loop_name, humanloop_request_id)
-            response['s3event'] = event['message']['s3event']
-            publish_message('A2I Human Loop Initiated', json.dumps(response), sys_vars['sns-topic'])
+            response = {
+                'NextTask': 'End',
+                'Task': {
+                    'Details': 'A2I HumanLoop Created',
+                    'Source': 'A2I Workflow',
+                    'DetectLabelRequestId': detectlabel_request_id,
+                    'DetectedConfidenceLevel': detected_confidence_level,
+                    'DetectedLabel': detected_label,
+                    'TaskObject': 's3://'+s3_bucket_name+'/'+s3_object_key,
+                    'HumanLoopRequestId': humanloop_request_id
+                },
+                'SystemVariables': sys_vars,
+                'ResponseMetadata': a2i_response['ResponseMetadata']
+            }
+            publish_message('Create A2I HumanLoop', json.dumps(response), sys_vars['sns-topic'])
             return {
                 'message': response
             }
@@ -1068,8 +1198,11 @@ Mappings:
         s3_resource = boto3.resource('s3')
         ssm = boto3.client('ssm')
         dynamodb = boto3.client('dynamodb')
-        def get_parameter(parameter_name):
-            response = ssm.get_parameter(Name=parameter_name)
+        sns = boto3.client('sns')
+        def get_parameter(name):
+            response = ssm.get_parameter(
+                Name=os.environ['parameter_store_path']+name
+            )
             return json.loads(response['Parameter']['Value'])
         def append_human_results(dynamodb_table, detectlabel_request_id, label, new_key, submission_time):
             response = dynamodb.update_item(
@@ -1089,28 +1222,188 @@ Mappings:
                 },
                 UpdateExpression='SET #HL=:h, #S3=:s, #AT=:a'
             )
+        def publish_message(sns_subject, sns_message, topic_arn):
+            response = sns.publish(
+                TopicArn=topic_arn,
+                Message=sns_message,
+                Subject=sns_subject
+            )
         def handler(event, context):
-            parameter_name = os.environ['parameter_store_path'] + 'For-System-Use-Only'
-            sys_vars = get_parameter(parameter_name)
+            sys_vars = get_parameter('For-System-Use-Only')
             dynamodb_table = sys_vars['dynamodb_table']
             bucket = event['s3event']['s3']['bucket']['name']
             key = event['s3event']['s3']['object']['key']
-            response = s3.get_object(Bucket = bucket, Key = key)
-            response = json.loads(response['Body'].read())
+            s3_response = s3.get_object(Bucket = bucket, Key = key)
+            s3_json = json.loads(s3_response['Body'].read())
             new_key=''
-            if len(response['humanAnswers']) != 0:
-                label = response['humanAnswers'][0]['answerContent']['crowd-image-classifier']['label']
-                submission_time = response['humanAnswers'][0]['submissionTime']
-                if label != 'None of the Above':
-                    taskObject = response['inputContent']['taskObject']
+            task_details =  'Error: Unable to process humanLoop data'
+            label = 'NA'
+            submission_time = 'NA'
+            if len(s3_json['humanAnswers']) != 0:
+                label = s3_json['humanAnswers'][0]['answerContent']['crowd-image-classifier']['label']
+                if label != 'None of the Above' and s3_json['inputContent']['source'] == 'A2I Workflow':
+                    taskObject = s3_json['inputContent']['taskObject']
                     bucket, key = taskObject.replace("s3://", "").split("/", 1)
                     copy_source = {'Bucket': bucket, 'Key': key}
-                    image_name = 'humanLoopName-' + response['humanLoopName'] + '-' + taskObject.split('/')[-1]
+                    image_name = 'humanLoopName-' + s3_json['humanLoopName'] + '-' + taskObject.split('/')[-1]
                     new_key = 'images_labeled_by_folder/' + label + '/' + image_name
                     s3_resource.meta.client.copy(copy_source, sys_vars['s3_bucket'], new_key)
-            detectlabel_request_id=response['inputContent']['detectLabelRequestId']
+                    task_details =  'Image copied to training folder'
+                else:
+                    task_details =  'Image NOT copied to training folder'
+            detectlabel_request_id=s3_json['inputContent']['detectLabelRequestId']
+            submission_time = s3_json['humanAnswers'][0]['submissionTime']
             append_human_results(dynamodb_table, detectlabel_request_id, label, new_key, submission_time)
-            response['s3event'] = event['s3event']
+            response = {
+                'NextTask': 'End',
+                'Task': {
+                    'Details': task_details,
+                    'HumanLoopSource': s3_json['inputContent']['source'],
+                    'HumanLabel': label
+                },
+                'SystemVariables': sys_vars,
+                'ResponseMetadata': s3_json
+            }
+            publish_message('Process HumanLoop Labeled Data', json.dumps(response), sys_vars['sns-topic'])
+            return {
+                'message': response
+            }
+      LambdaHumanSampling: |
+        import json
+        import os
+        import boto3
+        import uuid
+        import datetime
+        sns = boto3.client('sns')
+        a2i = boto3.client('sagemaker-a2i-runtime')
+        ssm = boto3.client('ssm')
+        dynamodb = boto3.client('dynamodb')
+        def get_parameter(name):
+            response = ssm.get_parameter(
+                Name=os.environ['parameter_store_path']+name
+            )
+            return json.loads(response['Parameter']['Value'])
+        def get_parameter_date(name):
+            response = ssm.get_parameter(
+                Name=os.environ['parameter_store_path']+name
+            )
+            return response['Parameter']['LastModifiedDate'].strftime("%Y-%m-%dT%H:%M:%-S.000Z")
+        def publish_message(sns_subject, sns_message, topic_arn):
+            response = sns.publish(
+                TopicArn=topic_arn,
+                Message=sns_message,
+                Subject=sns_subject
+            )
+        def update_human_sampling(dynamodb_table, detectlabel_request_id, human_loop_name, humanloop_request_id):
+            response = dynamodb.update_item(
+                TableName=dynamodb_table,
+                Key={
+                    'DetectLabelRequestId': {'S':detectlabel_request_id}
+                },
+                ExpressionAttributeNames={
+                    '#HLN':'HumanLoopName',
+                    '#HLRI':'HumanLoopRequestId',
+                    '#HSAM':'Sampled'
+                },
+                ExpressionAttributeValues={
+                    ':n': {'S':human_loop_name},
+                    ':i': {'S':humanloop_request_id},
+                    ':m': {'S':'Yes'}
+                },
+                UpdateExpression='SET #HLN=:n, #HLRI=:i, #HSAM=:m'
+            )
+        def query_gsi(dynamodb_table, dynamodb_table_GSI, sampled, scan_index_forward, limit, query_date):
+            if query_date == '':
+                query_date = '2000-01-01T00:00:00.000Z'
+            response = dynamodb.query(
+                TableName=dynamodb_table,
+                IndexName=dynamodb_table_GSI,
+                KeyConditionExpression='Sampled=:s AND DetectLabelDate>:d',
+                ExpressionAttributeValues={
+                    ':s': {'S':sampled},
+                    ':d': {'S':query_date}
+                },
+                ScanIndexForward=scan_index_forward,
+                Limit=limit
+            )
+            return response
+        def query_table(dynamodb_table, detectlabel_request_id):
+            response = dynamodb.query(
+                TableName=dynamodb_table,
+                KeyConditionExpression='DetectLabelRequestId=:i',
+                ExpressionAttributeValues={
+                    ':i': {'S':detectlabel_request_id}
+                },
+            )
+            return response
+        def handler(event, context):
+            sys_vars = get_parameter('For-System-Use-Only')
+            dynamodb_table = sys_vars['dynamodb_table']
+            dynamodb_table_GSI = sys_vars['dynamodb_table_GSI']
+            a2i_response = {"ResponseMetadata": ""}
+            if 'message' in event:
+                last_sample_date = event['message']['Task']['NewHumanSample']['DetectLabelDate']
+                last_detect_label_request_id = event['message']['Task']['NewHumanSample']['DetectLabelRequestId']
+            else:
+                last_sample_date = get_parameter_date('Enable-Automatic-Human-Sampling')
+                last_detect_label_request_id = ''
+                query_results = query_gsi(dynamodb_table, dynamodb_table_GSI, 'Yes', False, 1, last_sample_date)
+                if query_results['Count'] == 1:
+                    last_sample_date =  query_results['Items'][0]['DetectLabelDate']['S']
+                    last_detect_label_request_id = query_results['Items'][0]['DetectLabelRequestId']['S']
+            human_sampling_interval = int(get_parameter('Human-Sampling-Interval'))
+            query_results = query_gsi(dynamodb_table, dynamodb_table_GSI, 'No', True, human_sampling_interval, last_sample_date)
+            if query_results['Count'] < human_sampling_interval:
+                next_task = 'End'
+                task_details = 'Minimum human sampling interval not met'
+                new_sample_date = ''
+                new_detect_label_request_id = ''
+            else:
+                next_task = 'Check for new human sampling'
+                new_detect_label_request_id = query_results['Items'][human_sampling_interval-1]['DetectLabelRequestId']['S']
+                query_item = query_table(dynamodb_table, new_detect_label_request_id)
+                new_sample_date = query_item['Items'][0]['DetectLabelDate']['S']
+                if 'HumanLoopName' in query_item['Items'][0] :
+                    task_details = 'Minimum human sampling interval met. A2I already exist.'
+                    human_loop_name = query_item['Items'][0]['HumanLoopName']['S']
+                    humanloop_request_id = query_item['Items'][0]['HumanLoopRequestId']['S']
+                    a2i_response = {"ResponseMetadata": "NA"}
+                else:
+                    task_details = 'Minimum human sampling interval met. A2I created.'
+                    human_loop_name = str(uuid.uuid4())
+                    a2i_response = a2i.start_human_loop(
+                        HumanLoopName = human_loop_name,
+                        FlowDefinitionArn = sys_vars['flow_definition_arn'],
+                        HumanLoopInput = {
+                            'InputContent': json.dumps({
+                                'source': 'Human Sampling',
+                                'detectLabelRequestId': new_detect_label_request_id,
+                                'detectedConfidenceLevel': query_item['Items'][0]['DetectedConfidenceLevel']['N'],
+                                'detectedLabel': query_item['Items'][0]['DetectedLabel']['S'],
+                                'taskObject': 's3://'+query_item['Items'][0]['S3Bucket']['S']+'/'+query_item['Items'][0]['S3ObjectKey']['S']
+                            })
+                        }
+                    )
+                    humanloop_request_id = a2i_response['ResponseMetadata']['RequestId']
+                update_human_sampling(dynamodb_table, new_detect_label_request_id, human_loop_name, humanloop_request_id)
+            response = {
+                'NextTask': next_task,
+                'Task': {
+                    'Details': task_details,
+                    'NewDetectLabelRequests': query_results['Count'],
+                    'HumanSamplingInternal': human_sampling_interval,
+                    'LastHumanSample': {
+                        'DetectLabelRequestId': last_detect_label_request_id,
+                        'DetectLabelDate': last_sample_date
+                    },
+                    'NewHumanSample': {
+                        'DetectLabelRequestId': new_detect_label_request_id,
+                        'DetectLabelDate': new_sample_date
+                    }
+                },
+                'ResponseMetadata': a2i_response['ResponseMetadata']
+            }
+            publish_message('Human Sampling Event', json.dumps(response), sys_vars['sns-topic'])
             return {
                 'message': response
             }
@@ -1228,11 +1521,6 @@ Mappings:
                 },
                 {
                   "Variable": "$.source",
-                  "StringEquals": "aws.events",
-                  "Next": "Rekongition Model"
-                },
-                {
-                  "Variable": "$.source",
                   "StringEquals": "s3-detection-event",
                   "Next": "Rekongition Detection"
                 },
@@ -1240,6 +1528,16 @@ Mappings:
                   "Variable": "$.source",
                   "StringEquals": "s3-a2i-event",
                   "Next": "A2I HumanLoop Data"
+                },
+                {
+                  "Variable": "$.resources[0]",
+                  "StringMatches": "arn:aws:events:*-scheduled-poll",
+                  "Next": "Rekongition Model"
+                },
+                {
+                  "Variable": "$.resources[0]",
+                  "StringMatches": "arn:aws:events:*-sampling-poll",
+                  "Next": "Human Sampling"
                 }
               ],
               "Default": "Unknown Event"
@@ -1374,12 +1672,12 @@ Mappings:
               "Type": "Choice",
               "Choices": [
                 {
-                  "Variable": "$.message.A2I",
-                  "IsPresent": true,
-                  "Next": "Failed Confidence"
+                  "Variable": "$.message.NextTask",
+                  "StringEquals": "End",
+                  "Next": "Pass Confidence"
                 }
               ],
-              "Default": "Pass Confidence"
+              "Default": "Failed Confidence"
             },
             "Failed Confidence": {
               "Type": "Pass",
@@ -1389,7 +1687,7 @@ Mappings:
               "Type": "Choice",
               "Choices": [
                 {
-                  "Variable": "$.message.A2I",
+                  "Variable": "$.message.Task.UserSettings.EnableA2IWorkflow",
                   "BooleanEquals": true,
                   "Next": "Create HumanLoop"
                 }
@@ -1416,6 +1714,34 @@ Mappings:
             "Add Training Image": {
               "Type": "Pass",
               "End": true
+            },
+            "Human Sampling": {
+              "Type": "Pass",
+              "Next": "Check Last Sample"
+            },
+            "Check Last Sample": {
+              "Type": "Task",
+              "Resource": "${LambdaCheckHumanSampling}",
+              "Next": "Check Sampling Interval"
+            },
+            "Check Sampling Interval": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.message.NextTask",
+                  "StringEquals": "End",
+                  "Next": "No New Sample"
+                }
+              ],
+              "Default": "Create Human Sample"
+            },
+            "Create Human Sample": {
+              "Type": "Wait",
+              "Seconds": 5,
+              "Next": "Check Last Sample"
+            },
+            "No New Sample": {
+              "Type": "Succeed"
             },
             "Failure": {
               "Type": "Fail"

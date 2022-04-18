@@ -29,8 +29,10 @@ If the private team was deployed for you, the username and temporary password ar
 9.	For each image, review the image and choose the correct Amazon company logo or **None of the Above** to use as label.
 10.	Keep a tally of the options you choose in each task.
 11. Choose **Submit** to advance to the next image until you have completed all the labeling tasks.
-12. Return to the i`mages_labeled_by_folder` folder and review the changes.
+12. Return to the `images_labeled_by_folder` folder and review the changes.
 
-For each image you labeled, an [AWS Lambda](http://aws.amazon.com/lambda) function makes a copy of the original image, appends the prefix `humanLoopName` and an UUID to the original S3 object key, and adds it to the corresponding labeled folder. If the folder doesn’t exist, the Lambda function creates a corresponding labeled folder. For the `None of the Above` labels, nothing is done. This is how newly captured and labeled images are added to the training dataset.
+For each image you labeled, an [AWS Lambda](https://aws.amazon.com/lambda) function performs two tasks:
+- Make a copy of the original image, appends the prefix `humanLoopName` and an UUID to the original S3 object key, and adds it to the corresponding labeled folder. If the folder doesn’t exist, the Lambda function creates a corresponding labeled folder. For the `None of the Above` labels, nothing is done. This is how newly captured and labeled images are added to the training dataset.
+- Log the A2I results to the corresponding detection event for other downstream processes
 
-Next Step: [6-Conclusions-Cleanup](../6-Conclusions-Cleanup/)
+Next Step: [6-Human-Sampling](../6-Human-Sampling/)
