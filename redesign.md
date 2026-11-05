@@ -18,9 +18,10 @@ This file tracks the work to bring the sample up to date. The work started with 
 | D9: Failed training runs | Decided November 4, 2026: the next automatic run waits for new images |
 | D10: Email notifications | Decided November 4, 2026: milestones and problems only |
 | D11: Automated tests | Decided November 4, 2026: none. Each phase is tested by deploying it. |
+| D12: AWS WAF | Decided November 5, 2026: not built. The docs can explain how to add it. |
 | Human review design | Approved November 4, 2026 |
 | Trial T1 | Done November 4, 2026. All seven checks passed, and the trial resources are deleted. |
-| Build (H0 to H4) | H0 done November 4, 2026. H1 and H2 done and squash-merged into the local `v2` branch November 5, 2026. H3 in progress on the local `v2-h3` branch. H4 not started. |
+| Build (H0 to H4) | H0 done November 4, 2026. H1 to H3 done and squash-merged into the local `v2` branch November 5, 2026. H4 in progress on the local `v2-h4` branch. |
 | Optional modernization | O1 and O4 adopted for H1, November 4, 2026. The other open items aren't decided. |
 
 ## Why the sample needs a redesign
@@ -275,7 +276,7 @@ The sample keeps Step Functions as the orchestrator. The two SageMaker features 
 - A2I human loops become executions of a new review state machine. Each execution writes a review task and a Step Functions task token to DynamoDB, then waits for the token (`.waitForTaskToken`).
 - The Ground Truth private workforce and worker portal become a Cognito user pool and a small review portal. The portal's page is one HTML file in a private S3 bucket, served through CloudFront. CloudFront forwards `/api/*` requests to an API Gateway HTTP API with a Cognito JWT authorizer, and one Lambda function handles those API calls.
 
-All of the new parts are serverless and billed per use, except optional AWS WAF, which has a monthly charge when it's turned on. None of them depend on SageMaker. The running Custom Labels model is still the main cost.
+All of the new parts are serverless and billed per use. None of them depend on SageMaker. The running Custom Labels model is still the main cost.
 
 ### What replaces what
 
@@ -330,7 +331,7 @@ New:
 - A private S3 bucket for the review page. Only the CloudFront distribution can read it, through origin access control (OAC). At deploy time, CDK uploads the page and a small configuration file with the Cognito and API settings the page needs.
 - A CloudFront distribution that serves the page from the bucket and forwards `/api/*` requests to the HTTP API. The page and the API share one domain, so the browser needs no CORS setup. A response headers policy adds the security headers, such as Content-Security-Policy and HSTS.
 - An HTTP API with a Cognito JWT authorizer, and one Lambda function that handles only the API routes: claim, submit, and release a task. It's the only Lambda function the sample owns (D4).
-- Optional AWS WAF, off by default. See [Security](#security).
+- ~~Optional AWS WAF, off by default.~~ Not built (D12). See [Security](#security).
 - A Cognito app client (public, authorization code flow with PKCE) whose callback URL is the CloudFront URL, a domain, and a `reviewers` group. The stack always creates the user pool. The first reviewer is the notification email address, as in the current template.
 - Review attributes on the existing inference log items, plus a sparse GSI that lists open tasks by creation time.
 - SSM parameters: `Enable-Human-Review` (replaces `Enable-A2I-Workflow`), `Human-Review-Labels`, and `Human-Review-Timeout-Hours`.
@@ -365,12 +366,11 @@ Removed:
 - On submit, the API checks that the caller holds the claim and that the label is in the allowed list.
 - The page uses no third-party JavaScript. CloudFront adds a strict Content-Security-Policy and the other security headers.
 - The page's bucket is private, and only the CloudFront distribution can read it.
-- AWS WAF is a deploy-time option, off by default:
-  - When it's on, the stack adds a web ACL to the CloudFront distribution, plus a regional web ACL on the Cognito user pool to cover the hosted sign-in pages.
-  - A web ACL for CloudFront has to be created in us-east-1, so CDK puts it in a small us-east-1 stack. Readers in other Regions also have to bootstrap CDK in us-east-1.
+- AWS WAF isn't built (D12, decided November 5, 2026). It was planned as a deploy-time option, off by default. The docs can explain how to add it:
+  - A web ACL for the CloudFront distribution has to be created in us-east-1, plus a regional web ACL on the Cognito user pool to cover the sign-in pages.
   - With a basic rule set (AWS managed common rules, an IP reputation list, and a rate limit), each web ACL costs about $8 a month, even when idle.
-  - CloudFront's flat-rate plans include WAF in a fixed monthly price, with a $0 tier, but you sign up for them outside CloudFormation. The docs can mention them.
-  - Without WAF, API Gateway still rejects requests that don't carry a valid sign-in token, and only invited users can sign in.
+  - CloudFront's flat-rate plans include WAF in a fixed monthly price, with a $0 tier, but you sign up for them outside CloudFormation.
+  - Without WAF, API Gateway still rejects requests that don't carry a valid sign-in token, each API route is limited to 10 requests per second, and only invited users can sign in.
 - Amazon Cognito Sync is in maintenance, but user pools, which this design uses, are not.
 
 ### Alternatives considered
@@ -394,7 +394,7 @@ Removed:
 
 Each phase ends with a stack that deploys and can be tested. Commits stay local: nothing is pushed to GitHub, and no pull requests are opened, unless the owner says otherwise.
 
-Each phase is built on its own local branch (`v2-h1`, `v2-h2`, and so on), created from a local `v2` branch. After the owner reviews a phase, it's squash-merged into `v2`, so each phase becomes one commit. After H4, `v2` is merged into `main`. This tracker is committed on `v2`.
+Each phase is built on its own local branch (`v2-h1`, `v2-h2`, and so on), created from a local `v2` branch. After the owner reviews a phase, it's squash-merged into `v2`, so each phase becomes one commit, and the phase branch is deleted (the owner's rule since November 5, 2026). After H4, `v2` is merged into `main`. This tracker is committed on `v2`.
 
 - [x] **H0.** Tag the current commit, `db61b19`, as `v1-a2i` and push the tag, so readers can still find the A2I version. Done November 4, 2026: the annotated tag `v1-a2i` points to `db61b19` and is on GitHub.
 - [x] **T1.** Run a trial in a test account (us-west-2) before H1, to prove the parts of D4 and D7 that the docs don't settle. All seven checks passed on November 4, 2026, and the trial resources were deleted the same day. A throwaway CDK app in `spikes/t1/` created two stacks, `T1Core` and `T1Flows`, and used the 10 sample training images. The app wasn't part of the sample and was deleted after the trial. Each check has a pass condition and a fallback:
@@ -510,7 +510,37 @@ Each phase is built on its own local branch (`v2-h1`, `v2-h2`, and so on), creat
   The model ran for about 7.5 minutes, from the start request to the stop, which is about $0.50. Both settings were restored, and no reviews are left waiting. The H2 tests left three test copies in the training folders: `aws_logo/inference-image-6-80ac687a.png`, `aws_logo/Logo test (1)+é-80ac687a.png`, and `amazon_logo/h2-check-2-350f5f88.png`.
 
   Owner decisions, November 5, 2026: the Cognito user pool and `reviewers` group stay in H3, copies keep the ETag suffix, and an expired review emails and fails. Because the tests passed, H2 was squash-merged into `v2` without a separate review, and H3 started right away.
-- [ ] **H3.** Build the review portal: the Cognito user pool, the `reviewers` group, and the first reviewer (moved from H2), the Cognito app client and domain, the HTTP API and authorizer, the page bucket and CloudFront distribution, the review page, and the optional WAF web ACLs.
+- [x] **H3.** Done November 5, 2026: squash-merged into `v2`. Build the review portal: the Cognito user pool, the `reviewers` group, and the first reviewer (moved from H2), the Cognito app client and domain, the HTTP API and authorizer, the page bucket and CloudFront distribution, and the review page. The optional WAF web ACLs aren't built (D12).
+
+  H3 status, November 5, 2026: done. Built on the local `v2-h3` branch, deployed to the test account, tested by script, and walked through in a browser by the owner. WAF isn't built (D12).
+
+  H3 implementation notes, for review:
+  - The portal is a construct in `model_improvement/portal.py`. The page is in `model_improvement/portal_page/`: `index.html`, `app.js`, and `app.css`, with no third-party code.
+  - Cognito: the user pool uses the Essentials plan, the default, because managed login needs Essentials or Plus. It's free for the first 10,000 monthly active users, then $0.015 each. Only administrators add users. Reviewers sign in with a user name, which isn't case-sensitive. The first reviewer's user name is the notification email address, as in v1. Passwords need 12 characters or more, and temporary passwords last 7 days. Authenticator-app MFA is optional, and account recovery uses email. The invitation email names the portal URL.
+  - The user pool is deleted with the stack, along with its users. The bucket, the inference log, and the project are kept.
+  - App client: public (no secret), with the authorization code flow and PKCE, and the `openid`, `email`, and `profile` scopes. The callback and sign-out URLs are the portal URL. It prevents user-existence errors and allows token revocation. Access and ID tokens last 1 hour, and refresh tokens last 12 hours.
+  - The Cognito domain is `review-<last segment of the stack ID>`, with managed login and Cognito's default style.
+  - HTTP API: the three POST routes use a JWT authorizer (issuer: the user pool, audience: the app client). Each route is limited to 10 requests per second, with bursts of 20. The page sends the access token, which carries `cognito:groups` and `username`.
+  - CloudFront serves the page from a private bucket through origin access control, and sends `/api/*` to the HTTP API. Caching is off for both, because the page is small and the API is dynamic. The distribution uses price class 100 (edge locations in North America and Europe). Reviewers elsewhere can still use it, with more latency.
+  - Response headers on the page and the API: a Content-Security-Policy that allows scripts and styles from the portal only, images from the images bucket's Regional endpoint, and connections to the Cognito domain, with `frame-ancestors 'none'`, `form-action 'none'`, and `base-uri 'none'`. Also HSTS (1 year), `nosniff`, `X-Frame-Options: DENY`, and `Referrer-Policy: no-referrer`.
+  - CDK's built-in custom resource writes the page files with `Cache-Control: no-cache`, so no extra Lambda function is needed, and it deletes them with the stack. `config.json` holds the Region, the app client ID, the Cognito domain, and the portal URL.
+  - The page keeps tokens in the tab's session storage, and refreshes the access token when it expires. Sign-out revokes the refresh token and ends the Cognito session. "Give this image back" releases the claim and doesn't claim again, because the next claim would return the same task.
+  - Scripted tests: deploying with `-c reviewerTestSignIn=true` adds the admin user-password flow to the app client, so a script with IAM credentials can get tokens without a browser. It's off by default, and the test account was redeployed without it.
+  - Known limitation: the HTTP API's own `execute-api` URL is also reachable, not only through CloudFront. It still needs a valid token. WAF added later (D12) would cover CloudFront and the user pool, not that URL.
+
+  H3 test, November 5, 2026, in the test account, by script. Everything passed:
+
+  | Test | Result |
+  |---|---|
+  | Deploy | 31 new resources in 242 seconds. |
+  | Page | The page, `app.js`, `app.css`, and `config.json` were served with all the security headers. A missing file got 403. The managed login page loaded. |
+  | Cognito CORS | The token endpoint allows requests from the portal's origin, so the page can exchange the sign-in code. |
+  | API access | No token and a bad token got 401 from API Gateway. A signed-in user outside the `reviewers` group got 403. |
+  | Review through CloudFront | With real Cognito tokens, a reviewer claimed a task, loaded its image from the host that the CSP allows, released it, claimed it again, and submitted a label. The review recorded the Cognito user name. |
+  | First reviewer | Created with the invitation sent, in the `reviewers` group, and waiting to set a password. |
+  | Cleanup | The test users were deleted, and the stack was redeployed without the test flow in 13 seconds. |
+
+  Browser walkthrough, November 5, 2026, by the owner. Passed: the owner signed in with the invitation's temporary password, set a new password (the account is now CONFIRMED), and labeled two waiting sampling reviews as None of the above. One was a Whole Foods Market logo and one was an AWS service icon, and neither label is in `Human-Review-Labels`. Both reviews were saved with the reviewer `chanles@amazon.com`, and neither image was copied. The function logged no errors.
 - [ ] **H4.** Rewrite the README and sections 0, 1, 4, 5, 6, and 7, apply the DOC items, and redraw the diagrams. Section 1 switches from the CloudFormation console to running `cdk deploy` on the reader's computer. It lists the prerequisites and says that CloudShell isn't supported. The README explains that the first version used A2I and links the `v1-a2i` tag.
 
 ## Baseline updates
@@ -621,6 +651,8 @@ Decide each item separately.
 | 2026-11-04 | Deployed H1 to the test account (us-west-2) and ran the test plan. Everything passed: two training runs (10 then 20 images, F1 1.0 both times), detection, settings changes, the one-run-at-a-time check, the failed-run rule, and the model swap. Fixed a double slash in the evaluation output keys and redeployed. Stopped both models. Cost about $3.70. The stack stays deployed for H2. |
 | 2026-11-05 | Squash-merged H1 into the local `v2` branch (`751b7ac`) and started H2 on `v2-h2`. Built the review workflow, the review queue index, five review settings, and the review API function (R1). Changed the detection workflow to start low-confidence and sampled reviews. Moved the Cognito user pool and the `reviewers` group to H3. Deployed to the test account, where the review workflow and the review API passed their tests without a running model. The detection-to-review test is still to run, and needs a running model. |
 | 2026-11-05 | Ran the H2 detection test with the newest model for about 7.5 minutes. All review paths passed: low confidence, sampling, both, neither, a duplicate review name, and a copy of an image named with spaces, a plus sign, and an accented character. Recorded the owner's decisions (Cognito in H3, the ETag suffix, and expired reviews email and fail), corrected the note about duplicate copies, and deleted the `v2-h1` branch. Squash-merged H2 into `v2` and started H3 on `v2-h3`. |
+| 2026-11-05 | Built the H3 review portal on `v2-h3`: the Cognito user pool, `reviewers` group, first reviewer, app client, and managed login domain, the HTTP API with a JWT authorizer, and the review page in a private bucket behind CloudFront. Deployed it to the test account and tested it by script with real Cognito tokens. The invitation email went to the notification address. Created two waiting review tasks for the owner's browser walkthrough. The optional WAF isn't built yet. |
+| 2026-11-05 | The owner's browser walkthrough passed: sign-in with the invitation, a password change, and two reviews labeled None of the above. Decided D12 (don't build AWS WAF) and updated the design. Added the rule that phase branches are deleted after their squash-merge, and deleted `v2-h2`. Squash-merged H3 into `v2`, deleted `v2-h3`, and started H4 on `v2-h4`. |
 
 ## Sources
 

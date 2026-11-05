@@ -32,6 +32,8 @@ from aws_cdk import (
 )
 from constructs import Construct
 
+from model_improvement.portal import ReviewPortal
+
 STATE_MACHINE_DIR = Path(__file__).parent / "statemachines"
 
 TRAINING_IMAGES_PREFIX = "images_labeled_by_folder/"
@@ -398,6 +400,19 @@ class ModelImprovementStack(Stack):
         settings["Human-Review-Labels"].grant_read(review_api)
         review.grant(review_api, "states:SendTaskSuccess")
 
+        # The review portal (H3): sign-in, the HTTP API, and the review page.
+        portal = ReviewPortal(
+            self,
+            "Portal",
+            review_api=review_api,
+            images_bucket=bucket,
+            reviewer_group=REVIEWER_GROUP,
+            first_reviewer_email=notification_email.value_as_string,
+            name_suffix=stack_id_suffix,
+            log_group=custom_resource_logs,
+            test_sign_in=self.node.try_get_context("reviewerTestSignIn") in (True, "true"),
+        )
+
         # Settings: its parameters and the schedule.
         for name in ("Enable-Automatic-Training", "Automatic-Training-Poll-Frequency"):
             settings[name].grant_read(settings_workflow)
@@ -514,6 +529,19 @@ class ModelImprovementStack(Stack):
         CfnOutput(self, "DetectionStateMachineArn", value=detection.state_machine_arn)
         CfnOutput(self, "ReviewStateMachineArn", value=review.state_machine_arn)
         CfnOutput(self, "ReviewApiFunctionName", value=review_api.function_name)
+        CfnOutput(
+            self,
+            "ReviewPortalUrl",
+            value=portal.portal_url,
+            description="Reviewers sign in here. The first reviewer gets an invitation email with a temporary password.",
+        )
+        CfnOutput(
+            self,
+            "ReviewerUserPoolId",
+            value=portal.user_pool.user_pool_id,
+            description="Add reviewers to this user pool and its reviewers group.",
+        )
+        CfnOutput(self, "ReviewPortalClientId", value=portal.client.user_pool_client_id)
         CfnOutput(self, "InferenceLogTableName", value=inference_log.table_name)
         CfnOutput(self, "StateTableName", value=state_table.table_name)
         CfnOutput(self, "SettingsPath", value=f"{parameter_prefix}/", description="The settings in Parameter Store.")
