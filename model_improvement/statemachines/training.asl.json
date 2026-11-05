@@ -1,0 +1,677 @@
+{
+  "Comment": "Checks for new training images, rebuilds the Custom Labels datasets from the S3 folders, trains and evaluates a model, and replaces the running model.",
+  "QueryLanguage": "JSONata",
+  "StartAt": "Read settings",
+  "States": {
+    "Read settings": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:getParameters",
+      "Arguments": {
+        "Names": [
+          "${ParameterPrefix}/Enable-Automatic-Training",
+          "${ParameterPrefix}/Minimum-Untrained-Images",
+          "${ParameterPrefix}/Minimum-F1-Score",
+          "${ParameterPrefix}/Minimum-Inference-Units"
+        ]
+      },
+      "Assign": {
+        "trigger": "{% $states.input.trigger = 'schedule' ? 'schedule' : 'manual' %}",
+        "settings": "{% ( $p := $states.result.Parameters; $v := function($n) { $p[Name = '${ParameterPrefix}/' & $n].Value }; { 'automaticTraining': $lowercase($v('Enable-Automatic-Training')) = 'true', 'minimumNewImages': $number($v('Minimum-Untrained-Images')), 'minimumF1Score': $number($v('Minimum-F1-Score')), 'inferenceUnits': $number($v('Minimum-Inference-Units')) } ) %}",
+        "imageCount": 0,
+        "continuationToken": null,
+        "attempts": 0,
+        "failure": null
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Read state"
+    },
+    "Read state": {
+      "Type": "Task",
+      "Comment": "The state item holds the running model and the image counts (D8). A missing item means no training run has happened yet.",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Arguments": {
+        "TableName": "${StateTableName}",
+        "Key": { "StateId": { "S": "current" } },
+        "ConsistentRead": true
+      },
+      "Assign": {
+        "stateItem": "{% ( $i := $states.result.Item; { 'runningModelArn': $exists($i.RunningModelArn.S) ? $i.RunningModelArn.S : '', 'lastRunImageCount': $exists($i.LastRunImageCount.N) ? $number($i.LastRunImageCount.N) : 0 } ) %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Automatic training on?"
+    },
+    "Automatic training on?": {
+      "Type": "Choice",
+      "Comment": "Only scheduled runs check this setting. A run that an operator starts always trains.",
+      "Choices": [
+        { "Condition": "{% $trigger = 'schedule' and $not($settings.automaticTraining) %}", "Next": "Automatic training is off" }
+      ],
+      "Default": "List training runs"
+    },
+    "Automatic training is off": {
+      "Type": "Succeed",
+      "Output": { "result": "Automatic training is off." }
+    },
+    "List training runs": {
+      "Type": "Task",
+      "Comment": "Only one training run at a time, because each run deletes and rebuilds the project's datasets.",
+      "Resource": "arn:aws:states:::aws-sdk:sfn:listExecutions",
+      "Arguments": {
+        "StateMachineArn": "{% $states.context.StateMachine.Id %}",
+        "StatusFilter": "RUNNING",
+        "MaxResults": 10
+      },
+      "Assign": {
+        "otherRuns": "{% $count($states.result.Executions[ExecutionArn != $states.context.Execution.Id]) %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Another run in progress?"
+    },
+    "Another run in progress?": {
+      "Type": "Choice",
+      "Choices": [
+        { "Condition": "{% $otherRuns > 0 %}", "Next": "Training already running" }
+      ],
+      "Default": "Count images"
+    },
+    "Training already running": {
+      "Type": "Succeed",
+      "Output": { "result": "Another training run is in progress." }
+    },
+    "Count images": {
+      "Type": "Task",
+      "Comment": "Counts .jpg, .jpeg, and .png files in label folders, one page at a time. Pages of 500 keys stay under the 256 KiB state limit (T1 check 7). Keys are lowercased before matching, because Step Functions ignores regular expression flags.",
+      "Resource": "arn:aws:states:::aws-sdk:s3:listObjectsV2",
+      "Arguments": "{% $merge([{ 'Bucket': '${BucketName}', 'Prefix': 'images_labeled_by_folder/', 'MaxKeys': 500 }, $continuationToken ? { 'ContinuationToken': $continuationToken } : {}]) %}",
+      "Assign": {
+        "imageCount": "{% $imageCount + $count($states.result.Contents[$contains($lowercase(Key), /^images_labeled_by_folder\\/[^\\/]+\\/[^\\/]+\\.(jpe?g|png)$/)]) %}",
+        "continuationToken": "{% $states.result.IsTruncated = true ? $states.result.NextContinuationToken : null %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "More images to count?"
+    },
+    "More images to count?": {
+      "Type": "Choice",
+      "Choices": [
+        { "Condition": "{% $continuationToken != null %}", "Next": "Count images" }
+      ],
+      "Default": "Enough new images?"
+    },
+    "Enough new images?": {
+      "Type": "Choice",
+      "Comment": "Scheduled runs train only when enough images were added since the last training run, even if that run failed (D9).",
+      "Choices": [
+        {
+          "Condition": "{% $imageCount = 0 and $trigger = 'manual' %}",
+          "Assign": {
+            "failure": {
+              "Error": "NoTrainingImages",
+              "Cause": "There are no .jpg, .jpeg, or .png images in label folders under images_labeled_by_folder/, so there is nothing to train on."
+            }
+          },
+          "Next": "Notify failure"
+        },
+        {
+          "Condition": "{% $trigger = 'schedule' and ($imageCount - $stateItem.lastRunImageCount) < $settings.minimumNewImages %}",
+          "Next": "Not enough new images"
+        }
+      ],
+      "Default": "Record training run"
+    },
+    "Not enough new images": {
+      "Type": "Succeed",
+      "Output": "{% { 'result': 'Not enough new images to train.', 'images': $imageCount, 'newImages': $imageCount - $stateItem.lastRunImageCount, 'minimumNewImages': $settings.minimumNewImages } %}"
+    },
+    "Record training run": {
+      "Type": "Task",
+      "Comment": "Saves the image count before training, so a failed run isn't retried until new images arrive (D9).",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Arguments": {
+        "TableName": "${StateTableName}",
+        "Key": { "StateId": { "S": "current" } },
+        "UpdateExpression": "SET LastRunImageCount = :images, LastRunStarted = :started",
+        "ExpressionAttributeValues": {
+          ":images": { "N": "{% $string($imageCount) %}" },
+          ":started": { "S": "{% $now() %}" }
+        }
+      },
+      "Assign": {
+        "versionName": "{% $fromMillis($millis(), '[Y0001][M01][D01][H01][m01][s01]') %}",
+        "newImages": "{% $imageCount - $stateItem.lastRunImageCount %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Build manifest"
+    },
+    "Build manifest": {
+      "Type": "Map",
+      "Comment": "Writes one manifest line for each image, labeled with its folder name. Other objects, such as folder placeholders, return no lines.",
+      "Label": "BuildManifest",
+      "MaxConcurrency": 100,
+      "ItemReader": {
+        "Resource": "arn:aws:states:::s3:listObjectsV2",
+        "Arguments": {
+          "Bucket": "${BucketName}",
+          "Prefix": "images_labeled_by_folder/"
+        }
+      },
+      "ItemProcessor": {
+        "ProcessorConfig": { "Mode": "DISTRIBUTED", "ExecutionType": "EXPRESS" },
+        "StartAt": "Manifest line",
+        "States": {
+          "Manifest line": {
+            "Type": "Pass",
+            "Comment": "The S3 item reader reports LastModified in epoch seconds (T1 check 1).",
+            "Output": "{% ( $key := $states.input.Key; $contains($lowercase($key), /^images_labeled_by_folder\\/[^\\/]+\\/[^\\/]+\\.(jpe?g|png)$/) ? [{ 'source-ref': 's3://${BucketName}/' & $key, 'image-label': 1, 'image-label-metadata': { 'confidence': 1, 'class-name': $split($key, '/')[1], 'human-annotated': 'yes', 'creation-date': $fromMillis($round($number($states.input.LastModified) * 1000), '[Y0001]-[M01]-[D01]T[H01]:[m01]:[s01].[f001]'), 'type': 'groundtruth/image-classification' } }] : [] ) %}",
+            "End": true
+          }
+        }
+      },
+      "ResultWriter": {
+        "Resource": "arn:aws:states:::s3:putObject",
+        "Arguments": {
+          "Bucket": "${BucketName}",
+          "Prefix": "manifests"
+        },
+        "WriterConfig": { "OutputType": "JSONL", "Transformation": "FLATTEN" }
+      },
+      "Assign": {
+        "manifestIndexKey": "{% $states.result.ResultWriterDetails.Key %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 2, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Read manifest index"
+    },
+    "Read manifest index": {
+      "Type": "Task",
+      "Comment": "The map run's manifest.json lists the JSON Lines file that holds the manifest.",
+      "Resource": "arn:aws:states:::aws-sdk:s3:getObject",
+      "Arguments": {
+        "Bucket": "${BucketName}",
+        "Key": "{% $manifestIndexKey %}"
+      },
+      "Assign": {
+        "manifestKey": "{% $parse($states.result.Body).ResultFiles.SUCCEEDED[0].Key %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "List old datasets"
+    },
+    "List old datasets": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:rekognition:describeProjects",
+      "Arguments": {
+        "ProjectNames": ["${ProjectName}"]
+      },
+      "Assign": {
+        "oldDatasets": "{% ( $d := $states.result.ProjectDescriptions[0].Datasets.DatasetArn[]; $exists($d) ? $d : [] ) %}",
+        "attempts": 0
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Old datasets?"
+    },
+    "Old datasets?": {
+      "Type": "Choice",
+      "Choices": [
+        { "Condition": "{% $count($oldDatasets) > 0 %}", "Next": "Delete old datasets" }
+      ],
+      "Default": "Create training dataset"
+    },
+    "Delete old datasets": {
+      "Type": "Map",
+      "Comment": "Each run rebuilds the datasets from the S3 folders (D7). Running models don't depend on them (T1 check 3).",
+      "Items": "{% $oldDatasets %}",
+      "ItemProcessor": {
+        "ProcessorConfig": { "Mode": "INLINE" },
+        "StartAt": "Delete dataset",
+        "States": {
+          "Delete dataset": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::aws-sdk:rekognition:deleteDataset",
+            "Arguments": { "DatasetArn": "{% $states.input %}" },
+            "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+            "End": true
+          }
+        }
+      },
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Wait for dataset deletion"
+    },
+    "Wait for dataset deletion": {
+      "Type": "Wait",
+      "Seconds": 10,
+      "Next": "Check dataset deletion"
+    },
+    "Check dataset deletion": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:rekognition:describeProjects",
+      "Arguments": {
+        "ProjectNames": ["${ProjectName}"]
+      },
+      "Assign": {
+        "remainingDatasets": "{% $count($states.result.ProjectDescriptions[0].Datasets) %}",
+        "attempts": "{% $attempts + 1 %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Datasets deleted?"
+    },
+    "Datasets deleted?": {
+      "Type": "Choice",
+      "Choices": [
+        { "Condition": "{% $remainingDatasets = 0 %}", "Next": "Create training dataset" },
+        {
+          "Condition": "{% $attempts >= 60 %}",
+          "Assign": { "failure": { "Error": "DatasetDeletionTimeout", "Cause": "The project's old datasets weren't deleted within 10 minutes." } },
+          "Next": "Notify failure"
+        }
+      ],
+      "Default": "Wait for dataset deletion"
+    },
+    "Create training dataset": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:rekognition:createDataset",
+      "Arguments": {
+        "ProjectArn": "${ProjectArn}",
+        "DatasetType": "TRAIN",
+        "DatasetSource": {
+          "GroundTruthManifest": {
+            "S3Object": {
+              "Bucket": "${BucketName}",
+              "Name": "{% $manifestKey %}"
+            }
+          }
+        }
+      },
+      "Assign": {
+        "trainDatasetArn": "{% $states.result.DatasetArn %}",
+        "attempts": 0
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Wait for training dataset"
+    },
+    "Wait for training dataset": {
+      "Type": "Wait",
+      "Seconds": 10,
+      "Next": "Check training dataset"
+    },
+    "Check training dataset": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:rekognition:describeDataset",
+      "Arguments": { "DatasetArn": "{% $trainDatasetArn %}" },
+      "Assign": {
+        "trainDataset": "{% { 'status': $states.result.DatasetDescription.Status, 'message': $exists($states.result.DatasetDescription.StatusMessage) ? $states.result.DatasetDescription.StatusMessage : '' } %}",
+        "attempts": "{% $attempts + 1 %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Training dataset ready?"
+    },
+    "Training dataset ready?": {
+      "Type": "Choice",
+      "Choices": [
+        { "Condition": "{% $trainDataset.status = 'CREATE_COMPLETE' %}", "Next": "Create test dataset" },
+        {
+          "Condition": "{% $trainDataset.status = 'CREATE_FAILED' %}",
+          "Assign": { "failure": "{% { 'Error': 'TrainingDatasetFailed', 'Cause': 'Creating the training dataset from ' & $manifestKey & ' failed: ' & $trainDataset.message } %}" },
+          "Next": "Notify failure"
+        },
+        {
+          "Condition": "{% $attempts >= 60 %}",
+          "Assign": { "failure": { "Error": "TrainingDatasetTimeout", "Cause": "The training dataset wasn't created within 10 minutes." } },
+          "Next": "Notify failure"
+        }
+      ],
+      "Default": "Wait for training dataset"
+    },
+    "Create test dataset": {
+      "Type": "Task",
+      "Comment": "An empty test dataset. The next step moves images into it.",
+      "Resource": "arn:aws:states:::aws-sdk:rekognition:createDataset",
+      "Arguments": {
+        "ProjectArn": "${ProjectArn}",
+        "DatasetType": "TEST"
+      },
+      "Assign": {
+        "testDatasetArn": "{% $states.result.DatasetArn %}",
+        "attempts": 0
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Wait for test dataset"
+    },
+    "Wait for test dataset": {
+      "Type": "Wait",
+      "Seconds": 5,
+      "Next": "Check test dataset"
+    },
+    "Check test dataset": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:rekognition:describeDataset",
+      "Arguments": { "DatasetArn": "{% $testDatasetArn %}" },
+      "Assign": {
+        "testDataset": "{% { 'status': $states.result.DatasetDescription.Status, 'message': $exists($states.result.DatasetDescription.StatusMessage) ? $states.result.DatasetDescription.StatusMessage : '' } %}",
+        "attempts": "{% $attempts + 1 %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Test dataset ready?"
+    },
+    "Test dataset ready?": {
+      "Type": "Choice",
+      "Choices": [
+        { "Condition": "{% $testDataset.status = 'CREATE_COMPLETE' %}", "Next": "Split images" },
+        {
+          "Condition": "{% $testDataset.status = 'CREATE_FAILED' %}",
+          "Assign": { "failure": "{% { 'Error': 'TestDatasetFailed', 'Cause': 'Creating the test dataset failed: ' & $testDataset.message } %}" },
+          "Next": "Notify failure"
+        },
+        {
+          "Condition": "{% $attempts >= 60 %}",
+          "Assign": { "failure": { "Error": "TestDatasetTimeout", "Cause": "The test dataset wasn't created within 5 minutes." } },
+          "Next": "Notify failure"
+        }
+      ],
+      "Default": "Wait for test dataset"
+    },
+    "Split images": {
+      "Type": "Task",
+      "Comment": "Moves 20% of the images into the test dataset. The split includes every label (T1 check 2).",
+      "Resource": "arn:aws:states:::aws-sdk:rekognition:distributeDatasetEntries",
+      "Arguments": {
+        "Datasets": [
+          { "Arn": "{% $trainDatasetArn %}" },
+          { "Arn": "{% $testDatasetArn %}" }
+        ]
+      },
+      "Assign": { "attempts": 0 },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Wait for split"
+    },
+    "Wait for split": {
+      "Type": "Wait",
+      "Seconds": 10,
+      "Next": "Check training split"
+    },
+    "Check training split": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:rekognition:describeDataset",
+      "Arguments": { "DatasetArn": "{% $trainDatasetArn %}" },
+      "Assign": {
+        "trainDataset": "{% { 'status': $states.result.DatasetDescription.Status, 'message': $exists($states.result.DatasetDescription.StatusMessage) ? $states.result.DatasetDescription.StatusMessage : '' } %}",
+        "attempts": "{% $attempts + 1 %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Check test split"
+    },
+    "Check test split": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:rekognition:describeDataset",
+      "Arguments": { "DatasetArn": "{% $testDatasetArn %}" },
+      "Assign": {
+        "testDataset": "{% { 'status': $states.result.DatasetDescription.Status, 'message': $exists($states.result.DatasetDescription.StatusMessage) ? $states.result.DatasetDescription.StatusMessage : '' } %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Split done?"
+    },
+    "Split done?": {
+      "Type": "Choice",
+      "Choices": [
+        { "Condition": "{% $trainDataset.status = 'UPDATE_COMPLETE' and $testDataset.status = 'UPDATE_COMPLETE' %}", "Next": "Train model" },
+        {
+          "Condition": "{% $trainDataset.status = 'UPDATE_FAILED' or $testDataset.status = 'UPDATE_FAILED' %}",
+          "Assign": { "failure": "{% { 'Error': 'DatasetSplitFailed', 'Cause': 'Splitting the images into training and test datasets failed: ' & $trainDataset.message & ' ' & $testDataset.message } %}" },
+          "Next": "Notify failure"
+        },
+        {
+          "Condition": "{% $attempts >= 60 %}",
+          "Assign": { "failure": { "Error": "DatasetSplitTimeout", "Cause": "Splitting the images into training and test datasets didn't finish within 10 minutes." } },
+          "Next": "Notify failure"
+        }
+      ],
+      "Default": "Wait for split"
+    },
+    "Train model": {
+      "Type": "Task",
+      "Comment": "Training uses the project's datasets. Evaluation results go to evaluation/ in the bucket. Rekognition adds the slash after the prefix.",
+      "Resource": "arn:aws:states:::aws-sdk:rekognition:createProjectVersion",
+      "Arguments": {
+        "ProjectArn": "${ProjectArn}",
+        "VersionName": "{% $versionName %}",
+        "OutputConfig": {
+          "S3Bucket": "${BucketName}",
+          "S3KeyPrefix": "evaluation"
+        }
+      },
+      "Assign": {
+        "versionArn": "{% $states.result.ProjectVersionArn %}",
+        "attempts": 0
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Notify training started"
+    },
+    "Notify training started": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Arguments": {
+        "TopicArn": "${TopicArn}",
+        "Subject": "{% $substring('[${StackName}] Training started', 0, 100) %}",
+        "Message": "{% 'Training started for model version ' & $versionName & '.\n\nTraining images: ' & $string($imageCount) & ' (' & $string($newImages) & ' added since the last training run)\nTrigger: ' & ($trigger = 'schedule' ? 'scheduled check' : 'started by hand') & '\n\nThe workflow checks the training status every 5 minutes and emails you when training finishes. Training usually takes 30 minutes to an hour.' %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Wait for training"
+    },
+    "Wait for training": {
+      "Type": "Wait",
+      "Seconds": 300,
+      "Next": "Check training"
+    },
+    "Check training": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:rekognition:describeProjectVersions",
+      "Arguments": {
+        "ProjectArn": "${ProjectArn}",
+        "VersionNames": ["{% $versionName %}"]
+      },
+      "Assign": {
+        "version": "{% ( $d := $states.result.ProjectVersionDescriptions[0]; { 'status': $d.Status, 'message': $exists($d.StatusMessage) ? $d.StatusMessage : '', 'f1': $exists($d.EvaluationResult.F1Score) ? $d.EvaluationResult.F1Score : 0 } ) %}",
+        "attempts": "{% $attempts + 1 %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Training done?"
+    },
+    "Training done?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $version.status = 'TRAINING_COMPLETED' and $version.f1 >= $settings.minimumF1Score %}",
+          "Next": "Notify training finished"
+        },
+        {
+          "Condition": "{% $version.status = 'TRAINING_COMPLETED' %}",
+          "Assign": { "failure": "{% { 'Error': 'F1ScoreBelowMinimum', 'Cause': 'Model version ' & $versionName & ' finished training with an F1 score of ' & $formatNumber($version.f1, '0.000') & ', which is below Minimum-F1-Score (' & $string($settings.minimumF1Score) & '). The model was not started, and the running model is unchanged. The next scheduled check trains again only after ' & $string($settings.minimumNewImages) & ' more images are added.' } %}" },
+          "Next": "Notify failure"
+        },
+        {
+          "Condition": "{% $version.status = 'TRAINING_FAILED' %}",
+          "Assign": { "failure": "{% { 'Error': 'TrainingFailed', 'Cause': 'Training model version ' & $versionName & ' failed: ' & $version.message } %}" },
+          "Next": "Notify failure"
+        },
+        {
+          "Condition": "{% $attempts >= 576 %}",
+          "Assign": { "failure": "{% { 'Error': 'TrainingTimeout', 'Cause': 'Model version ' & $versionName & ' was still training after 48 hours.' } %}" },
+          "Next": "Notify failure"
+        }
+      ],
+      "Default": "Wait for training"
+    },
+    "Notify training finished": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Arguments": {
+        "TopicArn": "${TopicArn}",
+        "Subject": "{% $substring('[${StackName}] Training finished', 0, 100) %}",
+        "Message": "{% 'Model version ' & $versionName & ' finished training with an F1 score of ' & $formatNumber($version.f1, '0.000') & '. Minimum-F1-Score is ' & $string($settings.minimumF1Score) & '.\n\nStarting the model with ' & $string($settings.inferenceUnits) & ' inference unit' & ($settings.inferenceUnits = 1 ? '' : 's') & '. Starting a model takes several minutes, and you will get another email when it is running.' %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Start model"
+    },
+    "Start model": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:rekognition:startProjectVersion",
+      "Arguments": {
+        "ProjectVersionArn": "{% $versionArn %}",
+        "MinInferenceUnits": "{% $settings.inferenceUnits %}"
+      },
+      "Assign": { "attempts": 0 },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Wait for model"
+    },
+    "Wait for model": {
+      "Type": "Wait",
+      "Seconds": 60,
+      "Next": "Check model"
+    },
+    "Check model": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:rekognition:describeProjectVersions",
+      "Arguments": {
+        "ProjectArn": "${ProjectArn}",
+        "VersionNames": ["{% $versionName %}"]
+      },
+      "Assign": {
+        "version": "{% ( $d := $states.result.ProjectVersionDescriptions[0]; { 'status': $d.Status, 'message': $exists($d.StatusMessage) ? $d.StatusMessage : '', 'f1': $version.f1 } ) %}",
+        "attempts": "{% $attempts + 1 %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Model running?"
+    },
+    "Model running?": {
+      "Type": "Choice",
+      "Comment": "TRAINING_COMPLETED can show briefly before STARTING, so it counts as still starting.",
+      "Choices": [
+        { "Condition": "{% $version.status = 'RUNNING' %}", "Next": "Save running model" },
+        { "Condition": "{% $version.status in ['STARTING', 'TRAINING_COMPLETED'] and $attempts < 60 %}", "Next": "Wait for model" },
+        {
+          "Condition": "{% $version.status in ['STARTING', 'TRAINING_COMPLETED'] %}",
+          "Assign": { "failure": "{% { 'Error': 'ModelStartTimeout', 'Cause': 'Model version ' & $versionName & ' was still starting after an hour. Stop it in the Custom Labels console or with the AWS CLI to avoid charges.' } %}" },
+          "Next": "Notify failure"
+        }
+      ],
+      "Default": "Model start failed"
+    },
+    "Model start failed": {
+      "Type": "Pass",
+      "Assign": { "failure": "{% { 'Error': 'ModelStartFailed', 'Cause': 'Model version ' & $versionName & ' did not start. Status: ' & $version.status & '. ' & $version.message } %}" },
+      "Next": "Notify failure"
+    },
+    "Save running model": {
+      "Type": "Task",
+      "Comment": "Detection reads RunningModelArn from here, so the new model takes over as soon as this write completes.",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Arguments": {
+        "TableName": "${StateTableName}",
+        "Key": { "StateId": { "S": "current" } },
+        "UpdateExpression": "SET RunningModelArn = :arn, RunningModelVersion = :version, RunningModelF1Score = :f1, RunningModelStarted = :started, TrainedImageCount = :images",
+        "ExpressionAttributeValues": {
+          ":arn": { "S": "{% $versionArn %}" },
+          ":version": { "S": "{% $versionName %}" },
+          ":f1": { "N": "{% $string($version.f1) %}" },
+          ":started": { "S": "{% $now() %}" },
+          ":images": { "N": "{% $string($imageCount) %}" }
+        }
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 5, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "List running models"
+    },
+    "List running models": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:rekognition:describeProjectVersions",
+      "Arguments": {
+        "ProjectArn": "${ProjectArn}",
+        "MaxResults": 100
+      },
+      "Assign": {
+        "oldModels": "{% ( $m := $states.result.ProjectVersionDescriptions[Status = 'RUNNING' and ProjectVersionArn != $versionArn].ProjectVersionArn[]; $exists($m) ? $m : [] ) %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Old models running?"
+    },
+    "Old models running?": {
+      "Type": "Choice",
+      "Choices": [
+        { "Condition": "{% $count($oldModels) > 0 %}", "Next": "Stop old models" }
+      ],
+      "Default": "Notify model running"
+    },
+    "Stop old models": {
+      "Type": "Map",
+      "Comment": "Stops the models that the new model replaces. The stopped models stay in the project.",
+      "Items": "{% $oldModels %}",
+      "ItemProcessor": {
+        "ProcessorConfig": { "Mode": "INLINE" },
+        "StartAt": "Stop model",
+        "States": {
+          "Stop model": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::aws-sdk:rekognition:stopProjectVersion",
+            "Arguments": { "ProjectVersionArn": "{% $states.input %}" },
+            "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+            "End": true
+          }
+        }
+      },
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Notify model running"
+    },
+    "Notify model running": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Arguments": {
+        "TopicArn": "${TopicArn}",
+        "Subject": "{% $substring('[${StackName}] New model running', 0, 100) %}",
+        "Message": "{% 'Model version ' & $versionName & ' is running, and detection now uses it.\n\nF1 score: ' & $formatNumber($version.f1, '0.000') & '\nTraining images: ' & $string($imageCount) & '\nInference units: ' & $string($settings.inferenceUnits) & '\nStopped models: ' & ($count($oldModels) > 0 ? $join($oldModels, ', ') : 'none') & '\n\nModel ARN: ' & $versionArn & '\n\nYou are charged for each inference unit while the model runs.' %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Done"
+    },
+    "Done": {
+      "Type": "Succeed",
+      "Output": "{% { 'result': 'New model running.', 'modelVersion': $versionName, 'modelArn': $versionArn, 'f1Score': $version.f1, 'images': $imageCount, 'stoppedModels': $oldModels } %}"
+    },
+    "Notify failure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Arguments": {
+        "TopicArn": "${TopicArn}",
+        "Subject": "{% $substring('[${StackName}] ' & ($failure.Error = 'F1ScoreBelowMinimum' ? 'Model not started: F1 score below minimum' : 'Training failed'), 0, 100) %}",
+        "Message": "{% ( $region := $split($states.context.Execution.Id, ':')[3]; 'The training workflow failed.\n\nError: ' & $failure.Error & '\nCause: ' & ($exists($failure.Cause) ? $failure.Cause : 'none') & '\n\nRun details: https://' & $region & '.console.aws.amazon.com/states/home?region=' & $region & '#/v2/executions/details/' & $states.context.Execution.Id ) %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Next": "Failed"
+    },
+    "Failed": {
+      "Type": "Fail",
+      "Error": "{% $failure.Error %}",
+      "Cause": "{% $exists($failure.Cause) ? $failure.Cause : 'none' %}"
+    }
+  }
+}

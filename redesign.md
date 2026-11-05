@@ -20,7 +20,7 @@ This file tracks the work to bring the sample up to date. The work started with 
 | D11: Automated tests | Decided November 4, 2026: none. Each phase is tested by deploying it. |
 | Human review design | Approved November 4, 2026 |
 | Trial T1 | Done November 4, 2026. All seven checks passed, and the trial resources are deleted. |
-| Build (H0 to H4) | H0 done November 4, 2026. H1 in progress on the local `v2-h1` branch. H2 to H4 not started. |
+| Build (H0 to H4) | H0 done November 4, 2026. H1 built and tested in the test account November 4, 2026, on the local `v2-h1` branch, and waiting for review. H2 to H4 not started. |
 | Optional modernization | O1 and O4 adopted for H1, November 4, 2026. The other open items aren't decided. |
 
 ## Why the sample needs a redesign
@@ -426,6 +426,41 @@ Each phase is built on its own local branch (`v2-h1`, `v2-h2`, and so on), creat
 - [ ] **H1.** Rebuild the stack in CDK (Python) without A2I and Ground Truth: one Step Functions state machine per job (D4, D5), dataset-based training (D7), counter-based sampling (D6), the state table (D8), the Scheduler schedule (O1), on-demand tables (O4), the failed-run rule (D9), and the D10 emails. Apply R2, R3, and the open F items, and remove the old template, the `lambda/` folder, and `assets/task_ui.html` (DOC11). After this phase the stack deploys in any account, and training and detection work. Human review, including sampling, stays off until H2.
 
   H1 defaults: one stack. `aws-cdk-lib` 2.275.0, `constructs` 10.8.1, and CDK CLI 2.1147.0 are pinned, with the CLI in `package.json` and run through `npx cdk`. The schedule and its parameter share one default, 720 minutes (F8). Only `.jpg`, `.jpeg`, and `.png` files count as images, for training and for detection.
+
+  H1 status, November 4, 2026: the CDK app is on `v2-h1`. It synthesizes, and all four definitions pass `ValidateStateMachineDefinition`. The JSONata in each state was checked with the TestState API and mocked AWS responses. Those checks were one-off and aren't in the repository (D11). Layout: `app.py`, `cdk.json`, `requirements.txt`, and `package.json` at the root, with the stack in `model_improvement/stack.py` and the definitions in `model_improvement/statemachines/`.
+
+  H1 deployment test, November 4, 2026, in the test account (us-west-2). Everything passed:
+
+  | Test | Result |
+  |---|---|
+  | Deploy | The stack deployed in 132 seconds, with 51 resources. The two S3 folders exist, the schedule is `rate(12 hours)` and enabled, and the bucket sends events to EventBridge. |
+  | Empty bucket | A scheduled run ended with "Not enough new images" (0 images). A manual run failed with `NoTrainingImages` and emailed. |
+  | First training run | 10 images, plus a `README.txt` that was correctly left out. The manifest, both datasets, and the split took about 45 seconds: 8 training and 2 test images, 2 labels. Training took 15 minutes (546 billable seconds), with an F1 score of 1.0. The model start took 5.5 minutes. The run took 21.5 minutes in all and saved the model, `TrainedImageCount` 10, and `LastRunImageCount` 10. Evaluation results were written to the bucket, so Rekognition can use the workflow role's S3 permissions. No bucket policy for the Rekognition service is needed. |
+  | One run at a time | A manual run started during training ended with "Another training run is in progress." |
+  | Settings | Invalid values (confidence 150, F1 1.5, frequency 0, `yes`) were rejected by the allowed patterns. Four changes each updated the schedule within 5 seconds: `rate(1 minute)` enabled, then disabled, then `rate(720 minutes)` disabled, then enabled. The target input and retry policy were kept. |
+  | Detection | 10 inference images plus a `notes.txt`. The text file was skipped. The 10 images were logged with `DetectionNumber` 1 to 10, and 3 were below 70% and emailed. A detection during the retrain used the old model. |
+  | Failed-run rule (D9) | With no new images, a scheduled run ended with "Not enough new images" (10 images, 0 new). |
+  | Retrain | 10 more images, labeled by hand. 5 Whole Foods Market logos went into a new `wholefood_logo` folder, which added a third label. A scheduled-style run trained on 20 images and 3 labels (15 training, 5 test) in 16 minutes (672 billable seconds), with an F1 score of 1.0. It started the new model, stopped the old one, and updated the state item. The next detection used the new model. |
+  | Cleanup workflow | Run by hand with no models running, it succeeded and stopped nothing. Stopping models on stack delete hasn't been tested, because the stack stays deployed for H2. |
+  | Emails | 14 published, 9 delivered, 0 failed. The first 5 were published before the subscription was confirmed. |
+
+  Cost: about $3.70. That's 20 billable training minutes (about $0.34) and about 50 minutes of model hosting (about $3.35), counted from each start request to the stop. Both models are stopped.
+
+  Found and fixed during the test: `S3KeyPrefix` `evaluation/` produced keys like `evaluation//EvaluationResultSummary-....json`, because Rekognition adds its own slash. It's now `evaluation`, redeployed with only the training state machine changed.
+
+  Seen during the test: the schedule started the training workflow 39 seconds after deployment and again right after the settings were restored, outside the 12-hour rate. Scheduler starts a rate schedule soon after it's created or updated. Both runs ended without training ("Not enough new images" and "Another training run is in progress"). The H4 docs should say a check can run right after a deployment or a settings change.
+
+  H1 implementation notes, for review:
+  - The default stack name is `CustomLabelsModelImprovement`. Override it with `-c stackName=...`. The notification email is the `NotificationEmail` stack parameter.
+  - Settings are under `/<stack name>/` in Parameter Store. Each parameter has an allowed pattern, so Parameter Store rejects invalid values, such as a confidence above 100.
+  - The project name is the stack name plus the last segment of the stack ID, because the project is retained when the stack is deleted. Redeploying a stack with the same name creates a new project.
+  - The bucket, the inference log, and the project are retained when the stack is deleted. The state table, the log groups, and the parameters are deleted.
+  - The bucket sends events to EventBridge through the CloudFormation property. That avoids the Lambda function that CDK's `eventBridgeEnabled` property adds. The only Lambda function is CDK's own custom resource function (D4), and its log group is deleted with the stack.
+  - Each workflow emails its own failures with a clear subject, from a shared "Notify failure" step, and then fails (D10). The training workflow reports an F1 score below the minimum this way.
+  - Only one training run happens at a time. A run that finds another training run in progress ends without doing anything.
+  - Inference log items use the detection run's name as `DetectLabelRequestId`. They also get `DetectionNumber`, the D6 counter value, and `BelowMinimumConfidence`. The A2I attributes are gone.
+  - The training workflow polls the datasets every 10 seconds, training every 5 minutes, and model start every minute (T1 check 4). Replaced models are stopped but not deleted.
+  - Known limitation: a stack update that changes the training schedule resource resets the schedule to 720 minutes and enabled, even if the parameters say otherwise. Changing either parameter again fixes it. The H4 docs should mention this.
 - [ ] **H2.** Build the review backend: the review state machine, the DynamoDB attributes and GSI, the SSM parameters, and the portal API function (R1). Turn on human review and sampling, and test them with a script.
 - [ ] **H3.** Build the review portal: the Cognito app client and domain, the HTTP API and authorizer, the page bucket and CloudFront distribution, the review page, and the optional WAF web ACLs.
 - [ ] **H4.** Rewrite the README and sections 0, 1, 4, 5, 6, and 7, apply the DOC items, and redraw the diagrams. Section 1 switches from the CloudFormation console to running `cdk deploy` on the reader's computer. It lists the prerequisites and says that CloudShell isn't supported. The README explains that the first version used A2I and links the `v1-a2i` tag.
@@ -534,6 +569,8 @@ Decide each item separately.
 | 2026-11-04 | Decided not to support AWS CloudShell. Readers deploy from their own computer. CloudShell's `python3` is 3.9, and `aws-cdk-lib` 2.275.0 needs Python 3.10 or later. Updated D2, H4, and the T1 tooling finding. |
 | 2026-11-04 | Added a working rule to the build plan: commits stay local, and nothing is pushed to GitHub unless the owner says otherwise. |
 | 2026-11-04 | Adopted O1 (EventBridge Scheduler) and O4 (on-demand tables) for H1. Decided D9 (after a failed training run, wait for new images), D10 (email only milestones and problems), and D11 (no automated tests). Added `LastRunImageCount` to the D8 state item, the local branch flow and the H1 defaults to the build plan, and replaced the D4 note about TestState unit tests. Committed this tracker on the local `v2` branch and started H1 on `v2-h1`. |
+| 2026-11-04 | Wrote the H1 CDK app on `v2-h1`: one stack with the training, detection, settings, and cleanup state machines, the Scheduler schedule, on-demand tables, and the D10 emails. Removed the v1 template, the `lambda/` folder, and `assets/task_ui.html`. The app synthesizes and its definitions validate. It isn't deployed yet. Added the H1 status and implementation notes to the build plan. |
+| 2026-11-04 | Deployed H1 to the test account (us-west-2) and ran the test plan. Everything passed: two training runs (10 then 20 images, F1 1.0 both times), detection, settings changes, the one-run-at-a-time check, the failed-run rule, and the model swap. Fixed a double slash in the evaluation output keys and redeployed. Stopped both models. Cost about $3.70. The stack stays deployed for H2. |
 
 ## Sources
 

@@ -1,0 +1,82 @@
+{
+  "Comment": "Stops the project's running models. CloudFormation starts this workflow when the stack is deleted. The project and its models are kept (D4).",
+  "QueryLanguage": "JSONata",
+  "StartAt": "List models",
+  "States": {
+    "List models": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:rekognition:describeProjectVersions",
+      "Arguments": {
+        "ProjectArn": "${ProjectArn}",
+        "MaxResults": 100
+      },
+      "Assign": {
+        "runningModels": "{% ( $m := $states.result.ProjectVersionDescriptions[Status in ['RUNNING', 'STARTING']].ProjectVersionArn[]; $exists($m) ? $m : [] ) %}",
+        "failure": null
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Stop models"
+    },
+    "Stop models": {
+      "Type": "Map",
+      "Items": "{% $runningModels %}",
+      "ItemProcessor": {
+        "ProcessorConfig": { "Mode": "INLINE" },
+        "StartAt": "Stop model",
+        "States": {
+          "Stop model": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::aws-sdk:rekognition:stopProjectVersion",
+            "Arguments": { "ProjectVersionArn": "{% $states.input %}" },
+            "Output": "{% { 'model': $states.input, 'stopped': true } %}",
+            "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+            "Catch": [{ "ErrorEquals": ["States.ALL"], "Output": "{% { 'model': $states.input, 'stopped': false, 'error': $states.errorOutput.Error } %}", "Next": "Could not stop" }],
+            "End": true
+          },
+          "Could not stop": {
+            "Type": "Pass",
+            "End": true
+          }
+        }
+      },
+      "Assign": {
+        "results": "{% $states.result %}"
+      },
+      "Next": "All stopped?"
+    },
+    "All stopped?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $count($results[stopped = false]) > 0 %}",
+          "Assign": {
+            "failure": "{% { 'Error': 'ModelStopFailed', 'Cause': 'These models could not be stopped and may still be running: ' & $join($results[stopped = false].(model & ' (' & error & ')'), ', ') } %}"
+          },
+          "Next": "Notify failure"
+        }
+      ],
+      "Default": "Done"
+    },
+    "Done": {
+      "Type": "Succeed",
+      "Output": "{% { 'stoppedModels': $runningModels } %}"
+    },
+    "Notify failure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Arguments": {
+        "TopicArn": "${TopicArn}",
+        "Subject": "{% $substring('[${StackName}] Models may still be running after stack deletion', 0, 100) %}",
+        "Message": "{% 'The stack is being deleted, but its running models were not all stopped. You are charged while a model runs. Stop them in the Rekognition Custom Labels console or with aws rekognition stop-project-version.\n\nProject: ${ProjectArn}\nError: ' & $failure.Error & '\nCause: ' & ($exists($failure.Cause) ? $failure.Cause : 'none') %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Next": "Failed"
+    },
+    "Failed": {
+      "Type": "Fail",
+      "Error": "{% $failure.Error %}",
+      "Cause": "{% $exists($failure.Cause) ? $failure.Cause : 'none' %}"
+    }
+  }
+}

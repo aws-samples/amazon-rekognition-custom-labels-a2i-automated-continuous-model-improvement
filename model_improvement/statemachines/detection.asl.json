@@ -1,0 +1,182 @@
+{
+  "Comment": "Runs Custom Labels detection on an image added to images_for_detection/, logs the result, and emails low-confidence detections.",
+  "QueryLanguage": "JSONata",
+  "StartAt": "Image file?",
+  "States": {
+    "Image file?": {
+      "Type": "Choice",
+      "Comment": "The EventBridge rule sends every new object under images_for_detection/. Only .jpg, .jpeg, and .png files are detected. EventBridge delivers keys unencoded (T1 check 5).",
+      "Choices": [
+        {
+          "Condition": "{% $contains($lowercase($states.input.detail.object.key), /\\.(jpe?g|png)$/) %}",
+          "Assign": {
+            "image": "{% { 'bucket': $states.input.detail.bucket.name, 'key': $states.input.detail.object.key, 'etag': $exists($states.input.detail.object.etag) ? $states.input.detail.object.etag : '', 'uploaded': $states.input.time } %}",
+            "failure": null
+          },
+          "Next": "Read settings"
+        }
+      ],
+      "Default": "Not an image"
+    },
+    "Not an image": {
+      "Type": "Succeed",
+      "Output": "{% { 'result': 'Skipped, because the object is not a .jpg, .jpeg, or .png file.', 'key': $states.input.detail.object.key } %}"
+    },
+    "Read settings": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:getParameter",
+      "Arguments": {
+        "Name": "${ParameterPrefix}/Minimum-Label-Detection-Confidence"
+      },
+      "Assign": {
+        "minimumConfidence": "{% $number($states.result.Parameter.Value) %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 4, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Read state"
+    },
+    "Read state": {
+      "Type": "Task",
+      "Comment": "The training workflow saves the running model's ARN in the state item (D8).",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Arguments": {
+        "TableName": "${StateTableName}",
+        "Key": { "StateId": { "S": "current" } }
+      },
+      "Assign": {
+        "modelArn": "{% $exists($states.result.Item.RunningModelArn.S) ? $states.result.Item.RunningModelArn.S : '' %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 4, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Model running?"
+    },
+    "Model running?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $modelArn = '' %}",
+          "Assign": {
+            "failure": {
+              "Error": "NoModelRunning",
+              "Cause": "No model has been trained and started yet, so the image wasn't checked. Add training images and start a training run first."
+            }
+          },
+          "Next": "Notify failure"
+        }
+      ],
+      "Default": "Detect labels"
+    },
+    "Detect labels": {
+      "Type": "Task",
+      "Comment": "Returns only the top label. MinConfidence 0 makes sure low-confidence results come back too.",
+      "Resource": "arn:aws:states:::aws-sdk:rekognition:detectCustomLabels",
+      "Arguments": {
+        "ProjectVersionArn": "{% $modelArn %}",
+        "Image": {
+          "S3Object": {
+            "Bucket": "{% $image.bucket %}",
+            "Name": "{% $image.key %}"
+          }
+        },
+        "MaxResults": 1,
+        "MinConfidence": 0
+      },
+      "Assign": {
+        "detection": "{% ( $l := $states.result.CustomLabels[0]; { 'label': $exists($l.Name) ? $l.Name : 'none', 'confidence': $exists($l.Confidence) ? $l.Confidence : 0 } ) %}"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["Rekognition.ThrottlingException", "Rekognition.ProvisionedThroughputExceededException", "Rekognition.LimitExceededException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 6,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        },
+        { "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2, "JitterStrategy": "FULL" }
+      ],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Count detection"
+    },
+    "Count detection": {
+      "Type": "Task",
+      "Comment": "The detection counter for human sampling (D6). H2 uses it to send every Nth detection to review.",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Arguments": {
+        "TableName": "${StateTableName}",
+        "Key": { "StateId": { "S": "current" } },
+        "UpdateExpression": "ADD DetectionCount :one",
+        "ExpressionAttributeValues": { ":one": { "N": "1" } },
+        "ReturnValues": "UPDATED_NEW"
+      },
+      "Assign": {
+        "detectionNumber": "{% $number($states.result.Attributes.DetectionCount.N) %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 4, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Log detection"
+    },
+    "Log detection": {
+      "Type": "Task",
+      "Comment": "One inference log item per detection. The item ID is this run's name.",
+      "Resource": "arn:aws:states:::dynamodb:putItem",
+      "Arguments": {
+        "TableName": "${LogTableName}",
+        "Item": {
+          "DetectLabelRequestId": { "S": "{% $states.context.Execution.Name %}" },
+          "DetectLabelDate": { "S": "{% $image.uploaded %}" },
+          "S3Bucket": { "S": "{% $image.bucket %}" },
+          "S3ObjectKey": { "S": "{% $image.key %}" },
+          "S3ObjectEtag": { "S": "{% $image.etag %}" },
+          "ProjectVersionArn": { "S": "{% $modelArn %}" },
+          "DetectedLabel": { "S": "{% $detection.label %}" },
+          "DetectedConfidenceLevel": { "N": "{% $string($detection.confidence) %}" },
+          "MinimumConfidenceLevel": { "N": "{% $string($minimumConfidence) %}" },
+          "BelowMinimumConfidence": { "BOOL": "{% $detection.confidence < $minimumConfidence %}" },
+          "DetectionNumber": { "N": "{% $string($detectionNumber) %}" }
+        }
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 4, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Confidence below minimum?"
+    },
+    "Confidence below minimum?": {
+      "Type": "Choice",
+      "Choices": [
+        { "Condition": "{% $detection.confidence < $minimumConfidence %}", "Next": "Notify low confidence" }
+      ],
+      "Default": "Done"
+    },
+    "Notify low confidence": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Arguments": {
+        "TopicArn": "${TopicArn}",
+        "Subject": "{% $substring('[${StackName}] Low-confidence detection', 0, 100) %}",
+        "Message": "{% 'The model was unsure about an image.\n\nImage: s3://' & $image.bucket & '/' & $image.key & '\nTop label: ' & $detection.label & '\nConfidence: ' & $formatNumber($detection.confidence, '0.0') & '%\nMinimum-Label-Detection-Confidence: ' & $string($minimumConfidence) & '%\nModel: ' & $modelArn & '\n\nThe result is in the inference log under ID ' & $states.context.Execution.Name & '.' %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 4, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Done"
+    },
+    "Done": {
+      "Type": "Succeed",
+      "Output": "{% { 'id': $states.context.Execution.Name, 'image': 's3://' & $image.bucket & '/' & $image.key, 'label': $detection.label, 'confidence': $detection.confidence, 'minimumConfidence': $minimumConfidence, 'belowMinimumConfidence': $detection.confidence < $minimumConfidence, 'detectionNumber': $detectionNumber } %}"
+    },
+    "Notify failure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Arguments": {
+        "TopicArn": "${TopicArn}",
+        "Subject": "{% $substring('[${StackName}] Detection failed', 0, 100) %}",
+        "Message": "{% ( $region := $split($states.context.Execution.Id, ':')[3]; 'Detection failed for s3://' & $image.bucket & '/' & $image.key & '.\n\nError: ' & $failure.Error & '\nCause: ' & ($exists($failure.Cause) ? $failure.Cause : 'none') & '\n\nRun details: https://' & $region & '.console.aws.amazon.com/states/home?region=' & $region & '#/v2/executions/details/' & $states.context.Execution.Id ) %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 4, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Next": "Failed"
+    },
+    "Failed": {
+      "Type": "Fail",
+      "Error": "{% $failure.Error %}",
+      "Cause": "{% $exists($failure.Cause) ? $failure.Cause : 'none' %}"
+    }
+  }
+}
