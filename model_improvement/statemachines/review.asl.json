@@ -1,0 +1,210 @@
+{
+  "Comment": "Waits for a reviewer to label a detected image, then records the label. A low-confidence image is also added to the training folders. Sampled images are only recorded.",
+  "QueryLanguage": "JSONata",
+  "StartAt": "Read settings",
+  "States": {
+    "Read settings": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:getParameter",
+      "Arguments": {
+        "Name": "${ParameterPrefix}/Human-Review-Timeout-Hours"
+      },
+      "Assign": {
+        "task": "{% $states.input %}",
+        "timeoutSeconds": "{% $min([31536000, $max([60, $round($number($states.result.Parameter.Value) * 3600)])]) %}",
+        "answer": null,
+        "trainingKey": null,
+        "failure": null
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Valid input?"
+    },
+    "Valid input?": {
+      "Type": "Choice",
+      "Comment": "The detection workflow starts this workflow. The checks catch a run started by hand with the wrong input.",
+      "Choices": [
+        {
+          "Condition": "{% $type($task.id) = 'string' and $task.source in ['LowConfidence', 'HumanSampling'] and $type($task.image.key) = 'string' %}",
+          "Next": "Create review task"
+        }
+      ],
+      "Default": "Invalid input"
+    },
+    "Invalid input": {
+      "Type": "Pass",
+      "Assign": {
+        "failure": {
+          "Error": "InvalidInput",
+          "Cause": "The input needs id, source (LowConfidence or HumanSampling), and image.key."
+        }
+      },
+      "Next": "Notify failure"
+    },
+    "Create review task": {
+      "Type": "Task",
+      "Comment": "Adds the review task and its task token to the detection's inference log item, then waits until the review API sends the label with SendTaskSuccess, or until the task times out. ReviewQueue puts the task in the sparse ReviewQueue index.",
+      "Resource": "arn:aws:states:::aws-sdk:dynamodb:updateItem.waitForTaskToken",
+      "TimeoutSeconds": "{% $timeoutSeconds %}",
+      "Arguments": {
+        "TableName": "${LogTableName}",
+        "Key": { "DetectLabelRequestId": { "S": "{% $task.id %}" } },
+        "ConditionExpression": "attribute_exists(DetectLabelRequestId)",
+        "UpdateExpression": "SET ReviewStatus = :open, ReviewSource = :source, ReviewQueue = :pending, ReviewCreated = :created, ReviewExpires = :expires, ReviewTaskToken = :token REMOVE ReviewClaimedBy, ReviewClaimedByName, ReviewClaimExpires",
+        "ExpressionAttributeValues": {
+          ":open": { "S": "OPEN" },
+          ":source": { "S": "{% $task.source %}" },
+          ":pending": { "S": "pending" },
+          ":created": { "S": "{% $now() %}" },
+          ":expires": { "S": "{% $fromMillis($millis() + $timeoutSeconds * 1000) %}" },
+          ":token": { "S": "{% $states.context.Task.Token %}" }
+        }
+      },
+      "Assign": {
+        "answer": "{% $states.result %}"
+      },
+      "Retry": [
+        { "ErrorEquals": ["DynamoDb.ConditionalCheckFailedException"], "MaxAttempts": 0 },
+        { "ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 3, "MaxAttempts": 2, "BackoffRate": 2, "JitterStrategy": "FULL" }
+      ],
+      "Catch": [
+        { "ErrorEquals": ["States.Timeout"], "Next": "Mark expired" },
+        { "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Mark review failed" }
+      ],
+      "Next": "Valid answer?"
+    },
+    "Valid answer?": {
+      "Type": "Choice",
+      "Comment": "The review API checks the label against Human-Review-Labels. This check makes sure the label is safe to use as a folder name.",
+      "Choices": [
+        {
+          "Condition": "{% $type($answer.label) = 'string' and ($answer.label = 'None of the above' or $contains($answer.label, /^[A-Za-z0-9_-]+$/)) and $type($answer.reviewerId) = 'string' and $type($answer.reviewerName) = 'string' %}",
+          "Next": "Add to training images?"
+        }
+      ],
+      "Default": "Invalid answer"
+    },
+    "Invalid answer": {
+      "Type": "Pass",
+      "Assign": {
+        "failure": "{% { 'Error': 'InvalidAnswer', 'Cause': 'The review answer needs a valid label, reviewerId, and reviewerName. Received: ' & $string($answer) } %}"
+      },
+      "Next": "Mark review failed"
+    },
+    "Add to training images?": {
+      "Type": "Choice",
+      "Comment": "Only low-confidence images go into the training folders. Sampled images and None of the above answers are only recorded.",
+      "Choices": [
+        {
+          "Condition": "{% $task.source = 'LowConfidence' and $answer.label != 'None of the above' %}",
+          "Assign": {
+            "trainingKey": "{% ( $file := $split($task.image.key, '/')[-1]; $suffix := $type($task.image.etag) = 'string' and $task.image.etag != '' ? $substring($task.image.etag, 0, 8) : $substring($task.id, 0, 8); 'images_labeled_by_folder/' & $answer.label & '/' & $replace($file, /\\.[^.]*$/, '') & '-' & $suffix & $match($file, /\\.[^.]*$/).match ) %}"
+          },
+          "Next": "Copy to training folder"
+        }
+      ],
+      "Default": "Save review"
+    },
+    "Copy to training folder": {
+      "Type": "Task",
+      "Comment": "The copy's name ends with part of the image's ETag, so images with the same name don't overwrite each other, and the same image isn't added twice. CopySource must be URL-encoded. $encodeUrlComponent writes a space as +, so each + becomes %20. A + in the key is already %2B.",
+      "Resource": "arn:aws:states:::aws-sdk:s3:copyObject",
+      "Arguments": {
+        "Bucket": "${BucketName}",
+        "Key": "{% $trainingKey %}",
+        "CopySource": "{% '${BucketName}/' & $join($map($split($task.image.key, '/'), function($segment) { $replace($encodeUrlComponent($segment), '+', '%20') }), '/') %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Mark review failed" }],
+      "Next": "Save review"
+    },
+    "Save review": {
+      "Type": "Task",
+      "Comment": "Records the label and reviewer, and takes the task out of the review queue.",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Arguments": {
+        "TableName": "${LogTableName}",
+        "Key": { "DetectLabelRequestId": { "S": "{% $task.id %}" } },
+        "UpdateExpression": "{% 'SET ReviewStatus = :completed, HumanLabel = :label, HumanLabelMatchesModel = :match, ReviewedBy = :reviewer, ReviewedByName = :name, ReviewCompleted = :completed_at' & ($trainingKey ? ', TrainingImageKey = :training_key' : '') & ' REMOVE ReviewQueue, ReviewTaskToken, ReviewClaimedBy, ReviewClaimedByName, ReviewClaimExpires' %}",
+        "ExpressionAttributeValues": "{% $merge([{ ':completed': { 'S': 'COMPLETED' }, ':label': { 'S': $answer.label }, ':match': { 'BOOL': $answer.label = $task.detectedLabel }, ':reviewer': { 'S': $answer.reviewerId }, ':name': { 'S': $answer.reviewerName }, ':completed_at': { 'S': $now() } }, $trainingKey ? { ':training_key': { 'S': $trainingKey } } : {}]) %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 5, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Mark review failed" }],
+      "Next": "Done"
+    },
+    "Done": {
+      "Type": "Succeed",
+      "Output": "{% { 'id': $task.id, 'source': $task.source, 'label': $answer.label, 'reviewer': $answer.reviewerName, 'trainingImageKey': $trainingKey } %}"
+    },
+    "Mark expired": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Arguments": {
+        "TableName": "${LogTableName}",
+        "Key": { "DetectLabelRequestId": { "S": "{% $task.id %}" } },
+        "UpdateExpression": "SET ReviewStatus = :expired, ReviewClosed = :now REMOVE ReviewQueue, ReviewTaskToken, ReviewClaimedBy, ReviewClaimedByName, ReviewClaimExpires",
+        "ExpressionAttributeValues": {
+          ":expired": { "S": "EXPIRED" },
+          ":now": { "S": "{% $now() %}" }
+        }
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 5, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Notify expired"
+    },
+    "Notify expired": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Arguments": {
+        "TopicArn": "${TopicArn}",
+        "Subject": "{% $substring('[${StackName}] Review task expired', 0, 100) %}",
+        "Message": "{% ( $region := $split($states.context.Execution.Id, ':')[3]; 'No reviewer labeled an image within ' & $formatNumber($timeoutSeconds / 3600, '0.##') & ' hours (Human-Review-Timeout-Hours), so its review task expired.' & ($task.source = 'LowConfidence' ? ' The image was not added to the training images.' : '') & '\n\nImage: s3://${BucketName}/' & $task.image.key & '\nReason for review: ' & ($task.source = 'LowConfidence' ? 'low-confidence detection' : 'human sampling') & '\nInference log ID: ' & $task.id & '\n\nRun details: https://' & $region & '.console.aws.amazon.com/states/home?region=' & $region & '#/v2/executions/details/' & $states.context.Execution.Id ) %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Next": "Expired" }],
+      "Next": "Expired"
+    },
+    "Expired": {
+      "Type": "Fail",
+      "Error": "ReviewExpired",
+      "Cause": "{% 'No reviewer labeled the image within ' & $formatNumber($timeoutSeconds / 3600, '0.##') & ' hours.' %}"
+    },
+    "Mark review failed": {
+      "Type": "Task",
+      "Comment": "Takes the task out of the review queue, so reviewers don't get a task that can't be completed.",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Arguments": {
+        "TableName": "${LogTableName}",
+        "Key": { "DetectLabelRequestId": { "S": "{% $task.id %}" } },
+        "ConditionExpression": "attribute_exists(DetectLabelRequestId)",
+        "UpdateExpression": "SET ReviewStatus = :failed, ReviewClosed = :now REMOVE ReviewQueue, ReviewTaskToken, ReviewClaimedBy, ReviewClaimedByName, ReviewClaimExpires",
+        "ExpressionAttributeValues": {
+          ":failed": { "S": "FAILED" },
+          ":now": { "S": "{% $now() %}" }
+        }
+      },
+      "Retry": [
+        { "ErrorEquals": ["DynamoDB.ConditionalCheckFailedException"], "MaxAttempts": 0 },
+        { "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }
+      ],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Next": "Notify failure" }],
+      "Next": "Notify failure"
+    },
+    "Notify failure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Arguments": {
+        "TopicArn": "${TopicArn}",
+        "Subject": "{% $substring('[${StackName}] Review workflow failed', 0, 100) %}",
+        "Message": "{% ( $region := $split($states.context.Execution.Id, ':')[3]; 'The review workflow failed' & ($type($task.image.key) = 'string' ? ' for s3://${BucketName}/' & $task.image.key : '') & '.\n\nError: ' & $failure.Error & '\nCause: ' & ($exists($failure.Cause) ? $failure.Cause : 'none') & '\n\nRun details: https://' & $region & '.console.aws.amazon.com/states/home?region=' & $region & '#/v2/executions/details/' & $states.context.Execution.Id ) %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Next": "Failed"
+    },
+    "Failed": {
+      "Type": "Fail",
+      "Error": "{% $failure.Error %}",
+      "Cause": "{% $exists($failure.Cause) ? $failure.Cause : 'none' %}"
+    }
+  }
+}

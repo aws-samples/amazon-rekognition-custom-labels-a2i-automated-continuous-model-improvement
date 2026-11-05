@@ -1,5 +1,5 @@
 {
-  "Comment": "Runs Custom Labels detection on an image added to images_for_detection/, logs the result, and emails low-confidence detections.",
+  "Comment": "Runs Custom Labels detection on an image added to images_for_detection/, logs the result, starts a human review for low-confidence and sampled detections, and emails low-confidence detections.",
   "QueryLanguage": "JSONata",
   "StartAt": "Image file?",
   "States": {
@@ -11,6 +11,8 @@
           "Condition": "{% $contains($lowercase($states.input.detail.object.key), /\\.(jpe?g|png)$/) %}",
           "Assign": {
             "image": "{% { 'bucket': $states.input.detail.bucket.name, 'key': $states.input.detail.object.key, 'etag': $exists($states.input.detail.object.etag) ? $states.input.detail.object.etag : '', 'uploaded': $states.input.time } %}",
+            "reviewSource": null,
+            "reviewStarted": false,
             "failure": null
           },
           "Next": "Read settings"
@@ -24,12 +26,17 @@
     },
     "Read settings": {
       "Type": "Task",
-      "Resource": "arn:aws:states:::aws-sdk:ssm:getParameter",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:getParameters",
       "Arguments": {
-        "Name": "${ParameterPrefix}/Minimum-Label-Detection-Confidence"
+        "Names": [
+          "${ParameterPrefix}/Minimum-Label-Detection-Confidence",
+          "${ParameterPrefix}/Enable-Human-Review",
+          "${ParameterPrefix}/Enable-Automatic-Human-Sampling",
+          "${ParameterPrefix}/Human-Sampling-Interval"
+        ]
       },
       "Assign": {
-        "minimumConfidence": "{% $number($states.result.Parameter.Value) %}"
+        "settings": "{% ( $p := $states.result.Parameters; $v := function($n) { $p[Name = '${ParameterPrefix}/' & $n].Value }; { 'minimumConfidence': $number($v('Minimum-Label-Detection-Confidence')), 'humanReview': $lowercase($v('Enable-Human-Review')) = 'true', 'sampling': $lowercase($v('Enable-Automatic-Human-Sampling')) = 'true', 'samplingInterval': $number($v('Human-Sampling-Interval')) } ) %}"
       },
       "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 4, "BackoffRate": 2, "JitterStrategy": "FULL" }],
       "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
@@ -99,7 +106,7 @@
     },
     "Count detection": {
       "Type": "Task",
-      "Comment": "The detection counter for human sampling (D6). H2 uses it to send every Nth detection to review.",
+      "Comment": "The detection counter for human sampling (D6). Every Nth detection, where N is Human-Sampling-Interval, is sampled.",
       "Resource": "arn:aws:states:::dynamodb:updateItem",
       "Arguments": {
         "TableName": "${StateTableName}",
@@ -109,7 +116,9 @@
         "ReturnValues": "UPDATED_NEW"
       },
       "Assign": {
-        "detectionNumber": "{% $number($states.result.Attributes.DetectionCount.N) %}"
+        "detectionNumber": "{% $number($states.result.Attributes.DetectionCount.N) %}",
+        "belowMinimum": "{% $detection.confidence < $settings.minimumConfidence %}",
+        "sampled": "{% $settings.sampling and $settings.samplingInterval > 0 and $number($states.result.Attributes.DetectionCount.N) % $settings.samplingInterval = 0 %}"
       },
       "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 4, "BackoffRate": 2, "JitterStrategy": "FULL" }],
       "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
@@ -117,7 +126,7 @@
     },
     "Log detection": {
       "Type": "Task",
-      "Comment": "One inference log item per detection. The item ID is this run's name.",
+      "Comment": "One inference log item per detection. The item ID is this run's name. The review workflow adds the review attributes to this item.",
       "Resource": "arn:aws:states:::dynamodb:putItem",
       "Arguments": {
         "TableName": "${LogTableName}",
@@ -130,19 +139,67 @@
           "ProjectVersionArn": { "S": "{% $modelArn %}" },
           "DetectedLabel": { "S": "{% $detection.label %}" },
           "DetectedConfidenceLevel": { "N": "{% $string($detection.confidence) %}" },
-          "MinimumConfidenceLevel": { "N": "{% $string($minimumConfidence) %}" },
-          "BelowMinimumConfidence": { "BOOL": "{% $detection.confidence < $minimumConfidence %}" },
-          "DetectionNumber": { "N": "{% $string($detectionNumber) %}" }
+          "MinimumConfidenceLevel": { "N": "{% $string($settings.minimumConfidence) %}" },
+          "BelowMinimumConfidence": { "BOOL": "{% $belowMinimum %}" },
+          "DetectionNumber": { "N": "{% $string($detectionNumber) %}" },
+          "HumanSampled": { "BOOL": "{% $sampled %}" }
         }
       },
       "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 4, "BackoffRate": 2, "JitterStrategy": "FULL" }],
       "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Review needed?"
+    },
+    "Review needed?": {
+      "Type": "Choice",
+      "Comment": "A low-confidence detection gets a review when Enable-Human-Review is true. Its image is added to the training images after the review. A sampled detection gets a review when Enable-Automatic-Human-Sampling is true, and is only recorded. A detection that is both gets one low-confidence review.",
+      "Choices": [
+        {
+          "Condition": "{% $belowMinimum and $settings.humanReview %}",
+          "Assign": { "reviewSource": "LowConfidence" },
+          "Next": "Start review"
+        },
+        {
+          "Condition": "{% $sampled %}",
+          "Assign": { "reviewSource": "HumanSampling" },
+          "Next": "Start review"
+        }
+      ],
+      "Default": "Confidence below minimum?"
+    },
+    "Start review": {
+      "Type": "Task",
+      "Comment": "The review run's name is this run's name, so a detection can't get two reviews. Starting it again with the same input is idempotent.",
+      "Resource": "arn:aws:states:::states:startExecution",
+      "Arguments": {
+        "StateMachineArn": "${ReviewStateMachineArn}",
+        "Name": "{% $states.context.Execution.Name %}",
+        "Input": {
+          "id": "{% $states.context.Execution.Name %}",
+          "source": "{% $reviewSource %}",
+          "image": "{% $image %}",
+          "detectedLabel": "{% $detection.label %}",
+          "confidence": "{% $detection.confidence %}",
+          "minimumConfidence": "{% $settings.minimumConfidence %}",
+          "modelArn": "{% $modelArn %}",
+          "detectionNumber": "{% $detectionNumber %}",
+          "AWS_STEP_FUNCTIONS_STARTED_BY_EXECUTION_ID": "{% $states.context.Execution.Id %}"
+        }
+      },
+      "Assign": { "reviewStarted": true },
+      "Retry": [
+        { "ErrorEquals": ["StepFunctions.ExecutionAlreadyExistsException", "StepFunctions.ExecutionAlreadyExists"], "MaxAttempts": 0 },
+        { "ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 2, "MaxAttempts": 4, "BackoffRate": 2, "JitterStrategy": "FULL" }
+      ],
+      "Catch": [
+        { "ErrorEquals": ["StepFunctions.ExecutionAlreadyExistsException", "StepFunctions.ExecutionAlreadyExists"], "Assign": { "reviewStarted": true }, "Next": "Confidence below minimum?" },
+        { "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }
+      ],
       "Next": "Confidence below minimum?"
     },
     "Confidence below minimum?": {
       "Type": "Choice",
       "Choices": [
-        { "Condition": "{% $detection.confidence < $minimumConfidence %}", "Next": "Notify low confidence" }
+        { "Condition": "{% $belowMinimum %}", "Next": "Notify low confidence" }
       ],
       "Default": "Done"
     },
@@ -152,7 +209,7 @@
       "Arguments": {
         "TopicArn": "${TopicArn}",
         "Subject": "{% $substring('[${StackName}] Low-confidence detection', 0, 100) %}",
-        "Message": "{% 'The model was unsure about an image.\n\nImage: s3://' & $image.bucket & '/' & $image.key & '\nTop label: ' & $detection.label & '\nConfidence: ' & $formatNumber($detection.confidence, '0.0') & '%\nMinimum-Label-Detection-Confidence: ' & $string($minimumConfidence) & '%\nModel: ' & $modelArn & '\n\nThe result is in the inference log under ID ' & $states.context.Execution.Name & '.' %}"
+        "Message": "{% 'The model was unsure about an image.\n\nImage: s3://' & $image.bucket & '/' & $image.key & '\nTop label: ' & $detection.label & '\nConfidence: ' & $formatNumber($detection.confidence, '0.0') & '%\nMinimum-Label-Detection-Confidence: ' & $string($settings.minimumConfidence) & '%\nModel: ' & $modelArn & '\n\n' & ($reviewSource = 'LowConfidence' ? 'A review task is waiting for a reviewer. After a reviewer labels the image, it is added to the training images.' : $reviewSource = 'HumanSampling' ? 'Human review is off (Enable-Human-Review is false), but this detection was picked for human sampling, so a review task was created. Sampled images are not added to the training images.' : 'Human review is off (Enable-Human-Review is false), so no review task was created.') & '\n\nThe result is in the inference log under ID ' & $states.context.Execution.Name & '.' %}"
       },
       "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 4, "BackoffRate": 2, "JitterStrategy": "FULL" }],
       "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
@@ -160,15 +217,15 @@
     },
     "Done": {
       "Type": "Succeed",
-      "Output": "{% { 'id': $states.context.Execution.Name, 'image': 's3://' & $image.bucket & '/' & $image.key, 'label': $detection.label, 'confidence': $detection.confidence, 'minimumConfidence': $minimumConfidence, 'belowMinimumConfidence': $detection.confidence < $minimumConfidence, 'detectionNumber': $detectionNumber } %}"
+      "Output": "{% { 'id': $states.context.Execution.Name, 'image': 's3://' & $image.bucket & '/' & $image.key, 'label': $detection.label, 'confidence': $detection.confidence, 'minimumConfidence': $settings.minimumConfidence, 'belowMinimumConfidence': $belowMinimum, 'detectionNumber': $detectionNumber, 'sampled': $sampled, 'review': $reviewSource } %}"
     },
     "Notify failure": {
       "Type": "Task",
       "Resource": "arn:aws:states:::sns:publish",
       "Arguments": {
         "TopicArn": "${TopicArn}",
-        "Subject": "{% $substring('[${StackName}] Detection failed', 0, 100) %}",
-        "Message": "{% ( $region := $split($states.context.Execution.Id, ':')[3]; 'Detection failed for s3://' & $image.bucket & '/' & $image.key & '.\n\nError: ' & $failure.Error & '\nCause: ' & ($exists($failure.Cause) ? $failure.Cause : 'none') & '\n\nRun details: https://' & $region & '.console.aws.amazon.com/states/home?region=' & $region & '#/v2/executions/details/' & $states.context.Execution.Id ) %}"
+        "Subject": "{% $substring('[${StackName}] ' & ($reviewSource and $not($reviewStarted) ? 'Review task not created' : 'Detection failed'), 0, 100) %}",
+        "Message": "{% ( $region := $split($states.context.Execution.Id, ':')[3]; 'The detection workflow failed for s3://' & $image.bucket & '/' & $image.key & '.' & ($reviewSource and $not($reviewStarted) ? ' The detection is in the inference log, but its review task was not created.' : '') & '\n\nError: ' & $failure.Error & '\nCause: ' & ($exists($failure.Cause) ? $failure.Cause : 'none') & '\n\nRun details: https://' & $region & '.console.aws.amazon.com/states/home?region=' & $region & '#/v2/executions/details/' & $states.context.Execution.Id ) %}"
       },
       "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 4, "BackoffRate": 2, "JitterStrategy": "FULL" }],
       "Next": "Failed"

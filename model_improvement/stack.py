@@ -18,6 +18,7 @@ from aws_cdk import (
     aws_events as events,
     aws_events_targets as events_targets,
     aws_iam as iam,
+    aws_lambda as lambda_,
     aws_logs as logs,
     aws_rekognition as rekognition,
     aws_s3 as s3,
@@ -78,11 +79,49 @@ SETTINGS = {
         "70.0",
         r"^(100(\.0+)?|[0-9]{1,2}(\.[0-9]+)?)$",
         "The lowest confidence, from 0 to 100, for a detection to be accepted. Detections below "
-        "it are marked as low confidence in the inference log and emailed.",
+        "it are marked as low confidence in the inference log and emailed, and they get a human "
+        "review when Enable-Human-Review is true.",
+    ),
+    "Enable-Human-Review": (
+        "true",
+        r"^(true|false|True|False|TRUE|FALSE)$",
+        "Turns human review of low-confidence detections on (true) or off (false). After a reviewer "
+        "labels a low-confidence image, it's added to the training images.",
+    ),
+    "Enable-Automatic-Human-Sampling": (
+        "true",
+        r"^(true|false|True|False|TRUE|FALSE)$",
+        "Turns human sampling on (true) or off (false). Sampling sends every Nth detection to human "
+        "review, where N is Human-Sampling-Interval, to check the model's accuracy. Sampled images "
+        "aren't added to the training images.",
+    ),
+    "Human-Sampling-Interval": (
+        "1000",
+        r"^[1-9][0-9]{0,8}$",
+        "Sends every Nth detection to human review when Enable-Automatic-Human-Sampling is true.",
+    ),
+    "Human-Review-Labels": (
+        "amazon_logo,aws_logo",
+        r"^[A-Za-z0-9_-]+(,[A-Za-z0-9_-]+)*$",
+        "The labels that reviewers choose from, separated by commas. Each label is also a folder name "
+        "under images_labeled_by_folder/. Reviewers also get a None of the above choice.",
+    ),
+    "Human-Review-Timeout-Hours": (
+        "72",
+        r"^[0-9]{1,4}(\.[0-9]{1,2})?$",
+        "How long a review task waits for a reviewer before it expires, in hours. Decimals are "
+        "allowed. The shortest timeout is 1 minute.",
     ),
 }
 
 STANDARD_RETENTION = logs.RetentionDays.ONE_MONTH
+
+# Human review (H2). The reviewers group is created with the user pool in H3.
+REVIEW_QUEUE_INDEX = "ReviewQueue"
+REVIEWER_GROUP = "reviewers"
+CLAIM_SECONDS = 15 * 60
+IMAGE_URL_SECONDS = 5 * 60
+REVIEW_API_DIR = Path(__file__).parent / "review_api"
 
 
 class ModelImprovementStack(Stack):
@@ -121,6 +160,15 @@ class ModelImprovementStack(Stack):
             partition_key=dynamodb.Attribute(name="DetectLabelRequestId", type=dynamodb.AttributeType.STRING),
             billing=dynamodb.Billing.on_demand(),
             removal_policy=RemovalPolicy.RETAIN,
+        )
+        # The review queue. Only items with a waiting review task have ReviewQueue, so this sparse
+        # index lists exactly the open and claimed tasks, oldest first.
+        inference_log.add_global_secondary_index(
+            index_name=REVIEW_QUEUE_INDEX,
+            partition_key=dynamodb.Attribute(name="ReviewQueue", type=dynamodb.AttributeType.STRING),
+            sort_key=dynamodb.Attribute(name="ReviewCreated", type=dynamodb.AttributeType.STRING),
+            projection_type=dynamodb.ProjectionType.INCLUDE,
+            non_key_attributes=["ReviewStatus", "ReviewClaimedBy", "ReviewClaimExpires"],
         )
 
         # One item holds the run-time state: the running model and the counters (D8).
@@ -197,7 +245,12 @@ class ModelImprovementStack(Stack):
         }
 
         training = self._state_machine("Training", "training.asl.json", substitutions)
-        detection = self._state_machine("Detection", "detection.asl.json", substitutions)
+        review = self._state_machine("Review", "review.asl.json", substitutions)
+        detection = self._state_machine(
+            "Detection",
+            "detection.asl.json",
+            {**substitutions, "ReviewStateMachineArn": review.state_machine_arn},
+        )
         cleanup = self._state_machine(
             "Cleanup",
             "cleanup.asl.json",
@@ -291,14 +344,59 @@ class ModelImprovementStack(Stack):
             ],
         )
 
-        # Detection: its setting, the state item, the log, the model, and the uploaded images.
-        settings["Minimum-Label-Detection-Confidence"].grant_read(detection)
+        # Detection: its settings, the state item, the log, the model, the uploaded images, and
+        # starting reviews.
+        for name in (
+            "Minimum-Label-Detection-Confidence",
+            "Enable-Human-Review",
+            "Enable-Automatic-Human-Sampling",
+            "Human-Sampling-Interval",
+        ):
+            settings[name].grant_read(detection)
         state_table.grant(detection, "dynamodb:GetItem", "dynamodb:UpdateItem")
         inference_log.grant(detection, "dynamodb:PutItem")
         bucket.grant_read(detection, f"{DETECTION_IMAGES_PREFIX}*")
         detection.add_to_role_policy(
             iam.PolicyStatement(actions=["rekognition:DetectCustomLabels"], resources=[project_resources])
         )
+        review.grant_start_execution(detection)
+
+        # Review: its setting, the review attributes, and copying images into the training folders.
+        settings["Human-Review-Timeout-Hours"].grant_read(review)
+        inference_log.grant(review, "dynamodb:UpdateItem")
+        bucket.grant_read(review, f"{DETECTION_IMAGES_PREFIX}*")
+        bucket.grant_put(review, f"{TRAINING_IMAGES_PREFIX}*")
+        topic.grant_publish(review)
+
+        # The review API, the only Lambda function the sample owns (D4). API Gateway calls it in H3.
+        review_api_logs = logs.LogGroup(
+            self, "ReviewApiLogs", retention=STANDARD_RETENTION, removal_policy=RemovalPolicy.DESTROY
+        )
+        review_api = lambda_.Function(
+            self,
+            "ReviewApi",
+            description="Review API: claims review tasks, submits labels, and releases claims.",
+            runtime=lambda_.Runtime.PYTHON_3_14,
+            architecture=lambda_.Architecture.ARM_64,
+            handler="index.handler",
+            code=lambda_.Code.from_asset(str(REVIEW_API_DIR), exclude=["__pycache__", "*.pyc"]),
+            memory_size=256,
+            timeout=Duration.seconds(10),
+            log_group=review_api_logs,
+            environment={
+                "TABLE_NAME": inference_log.table_name,
+                "QUEUE_INDEX": REVIEW_QUEUE_INDEX,
+                "LABELS_PARAMETER": settings["Human-Review-Labels"].parameter_name,
+                "REVIEWER_GROUP": REVIEWER_GROUP,
+                "CLAIM_SECONDS": str(CLAIM_SECONDS),
+                "IMAGE_URL_SECONDS": str(IMAGE_URL_SECONDS),
+            },
+        )
+        inference_log.grant(review_api, "dynamodb:Query", "dynamodb:UpdateItem")
+        # The presigned image URLs use the function's permissions.
+        bucket.grant_read(review_api, f"{DETECTION_IMAGES_PREFIX}*")
+        settings["Human-Review-Labels"].grant_read(review_api)
+        review.grant(review_api, "states:SendTaskSuccess")
 
         # Settings: its parameters and the schedule.
         for name in ("Enable-Automatic-Training", "Automatic-Training-Poll-Frequency"):
@@ -414,6 +512,8 @@ class ModelImprovementStack(Stack):
             "--state-machine-arn <this value>",
         )
         CfnOutput(self, "DetectionStateMachineArn", value=detection.state_machine_arn)
+        CfnOutput(self, "ReviewStateMachineArn", value=review.state_machine_arn)
+        CfnOutput(self, "ReviewApiFunctionName", value=review_api.function_name)
         CfnOutput(self, "InferenceLogTableName", value=inference_log.table_name)
         CfnOutput(self, "StateTableName", value=state_table.table_name)
         CfnOutput(self, "SettingsPath", value=f"{parameter_prefix}/", description="The settings in Parameter Store.")

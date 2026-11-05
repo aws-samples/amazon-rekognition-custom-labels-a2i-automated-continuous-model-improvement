@@ -20,7 +20,7 @@ This file tracks the work to bring the sample up to date. The work started with 
 | D11: Automated tests | Decided November 4, 2026: none. Each phase is tested by deploying it. |
 | Human review design | Approved November 4, 2026 |
 | Trial T1 | Done November 4, 2026. All seven checks passed, and the trial resources are deleted. |
-| Build (H0 to H4) | H0 done November 4, 2026. H1 built and tested in the test account November 4, 2026, on the local `v2-h1` branch, and waiting for review. H2 to H4 not started. |
+| Build (H0 to H4) | H0 done November 4, 2026. H1 and H2 done and squash-merged into the local `v2` branch November 5, 2026. H3 in progress on the local `v2-h3` branch. H4 not started. |
 | Optional modernization | O1 and O4 adopted for H1, November 4, 2026. The other open items aren't decided. |
 
 ## Why the sample needs a redesign
@@ -423,7 +423,7 @@ Each phase is built on its own local branch (`v2-h1`, `v2-h2`, and so on), creat
   Tooling finding: the CDK CLI installed on the test machine (2.1117.0) was too old for the current `aws-cdk-lib` (2.275.0 needs CLI 2.1147.0 or later), so the trial installed the CLI locally in `spikes/t1/`. The test machine's global CLI was updated to 2.1147.0 after the trial. H1 should pin both versions.
 
   Teardown finding: after the model and both datasets were deleted, `cdk destroy` removed both stacks and everything in them, including the project. It left three CloudWatch log groups, one for each Lambda function that CDK adds for its own custom resources (S3 auto-delete, S3 bucket notifications, and the EventBridge-to-Logs resource policy). Lambda creates these log groups on first run, outside the stack, so they were deleted by hand. The `@aws-cdk/aws-lambda:useCdkManagedLogGroup` flag, which `cdk init` turns on, doesn't fix this: it gives the `AwsCustomResource` function a stack log group that's retained on delete, and the other two functions get none. H1 should pass its cleanup `AwsCustomResource` a log group that's deleted with the stack (the `log_group` property). Section 7 should list the log groups that remain, and the `CDKToolkit` stack and its assets bucket, which `cdk destroy` doesn't remove.
-- [ ] **H1.** Rebuild the stack in CDK (Python) without A2I and Ground Truth: one Step Functions state machine per job (D4, D5), dataset-based training (D7), counter-based sampling (D6), the state table (D8), the Scheduler schedule (O1), on-demand tables (O4), the failed-run rule (D9), and the D10 emails. Apply R2, R3, and the open F items, and remove the old template, the `lambda/` folder, and `assets/task_ui.html` (DOC11). After this phase the stack deploys in any account, and training and detection work. Human review, including sampling, stays off until H2.
+- [x] **H1.** Done November 5, 2026: squash-merged into `v2` as `751b7ac`. Rebuild the stack in CDK (Python) without A2I and Ground Truth: one Step Functions state machine per job (D4, D5), dataset-based training (D7), counter-based sampling (D6), the state table (D8), the Scheduler schedule (O1), on-demand tables (O4), the failed-run rule (D9), and the D10 emails. Apply R2, R3, and the open F items, and remove the old template, the `lambda/` folder, and `assets/task_ui.html` (DOC11). After this phase the stack deploys in any account, and training and detection work. Human review, including sampling, stays off until H2.
 
   H1 defaults: one stack. `aws-cdk-lib` 2.275.0, `constructs` 10.8.1, and CDK CLI 2.1147.0 are pinned, with the CLI in `package.json` and run through `npx cdk`. The schedule and its parameter share one default, 720 minutes (F8). Only `.jpg`, `.jpeg`, and `.png` files count as images, for training and for detection.
 
@@ -461,8 +461,56 @@ Each phase is built on its own local branch (`v2-h1`, `v2-h2`, and so on), creat
   - Inference log items use the detection run's name as `DetectLabelRequestId`. They also get `DetectionNumber`, the D6 counter value, and `BelowMinimumConfidence`. The A2I attributes are gone.
   - The training workflow polls the datasets every 10 seconds, training every 5 minutes, and model start every minute (T1 check 4). Replaced models are stopped but not deleted.
   - Known limitation: a stack update that changes the training schedule resource resets the schedule to 720 minutes and enabled, even if the parameters say otherwise. Changing either parameter again fixes it. The H4 docs should mention this.
-- [ ] **H2.** Build the review backend: the review state machine, the DynamoDB attributes and GSI, the SSM parameters, and the portal API function (R1). Turn on human review and sampling, and test them with a script.
-- [ ] **H3.** Build the review portal: the Cognito app client and domain, the HTTP API and authorizer, the page bucket and CloudFront distribution, the review page, and the optional WAF web ACLs.
+- [x] **H2.** Done November 5, 2026: squash-merged into `v2`. Build the review backend: the review state machine, the DynamoDB attributes and GSI, the SSM parameters, and the portal API function (R1). Turn on human review and sampling, and test them with a script.
+
+  H2 status, November 5, 2026: done. Built on the local `v2-h2` branch, deployed to the test account, and fully tested, including the detection-to-review path with a running model.
+
+  H2 implementation notes, for review:
+  - Scope change: the Cognito user pool, the `reviewers` group, and the first reviewer move to H3. Creating the first reviewer sends an invitation email with a temporary password, and there's no sign-in page until H3. The function checks for the `reviewers` group in the token claims, so H2 doesn't need the pool.
+  - New settings: `Enable-Human-Review` (true), `Enable-Automatic-Human-Sampling` (true), `Human-Sampling-Interval` (1000), `Human-Review-Labels` (`amazon_logo,aws_logo`), and `Human-Review-Timeout-Hours` (72). There are 11 settings in all. Labels may contain only letters, digits, underscores, and hyphens, because each label is also a folder name. The timeout accepts decimals, and the shortest timeout is 1 minute.
+  - The two review switches are independent. A low-confidence detection gets a review when `Enable-Human-Review` is true. A sampled detection gets one when `Enable-Automatic-Human-Sampling` is true. A detection that is both gets one low-confidence review. The inference log records `HumanSampled` for every detection.
+  - The review run's name is the detection's inference log ID, so a detection can't get two reviews. The detection workflow treats `ExecutionAlreadyExists` as success.
+  - Review attributes on the inference log item: `ReviewStatus` (OPEN, CLAIMED, SUBMITTED, COMPLETED, EXPIRED, or FAILED), `ReviewSource`, `ReviewCreated`, `ReviewExpires`, the claim (`ReviewClaimedBy`, `ReviewClaimedByName`, `ReviewClaimExpires`), and the result (`HumanLabel`, `HumanLabelMatchesModel`, `ReviewedBy`, `ReviewedByName`, `ReviewCompleted`, `TrainingImageKey`). `HumanLabelMatchesModel` supports the sampling audits. `ReviewTaskToken` and `ReviewQueue` are removed when the review ends.
+  - The review queue is a sparse index named `ReviewQueue`, keyed on `ReviewQueue` and `ReviewCreated`. Only waiting tasks have the `ReviewQueue` attribute.
+  - The review workflow waits with `aws-sdk:dynamodb:updateItem.waitForTaskToken`. It retries only `States.TaskFailed`, so a timeout is never retried.
+  - A labeled low-confidence image is copied to `images_labeled_by_folder/<label>/<name>-<first 8 characters of the ETag>.<extension>`. That stops two different images with the same name from overwriting each other. The same image uploaded again under the same name is copied only once. Under a different name, it's copied again.
+  - An expired review emails the operator and ends as a failed run (`ReviewExpired`), because the image didn't get its review. A completed review doesn't email (D10). The low-confidence email now says whether a review task was created.
+  - The review API function runs on `python3.14` (R1) on arm64, with 256 MB and a 10-second timeout. It has three routes: claim, submit, and release. It never returns the model's label or confidence. It never logs task tokens or presigned URLs. Its only Step Functions permission is `states:SendTaskSuccess` on the review state machine.
+  - Claiming: the oldest open task is claimed first, with a conditional write. A reviewer who already holds a task gets the same task back, and the claim is renewed. A claim lasts 15 minutes, after which another reviewer can take the task.
+  - Submitting: the claim check and the change to SUBMITTED are one conditional write, so the next claim can't return a task that's being submitted. If `SendTaskSuccess` fails for a reason other than a closed task, the claim is restored, so the reviewer can submit again.
+  - Presigned image URLs last 5 minutes. They use the Regional S3 endpoint, so they work right after the bucket is created. The H3 page's Content-Security-Policy has to allow images from `https://<bucket>.s3.<region>.amazonaws.com`.
+
+  H2 test, November 5, 2026, in the test account, without a running model. A throwaway script (not in the repository, D11) started reviews for H1 inference log items and called the function directly, with the claims a JWT authorizer would pass. Everything passed:
+
+  | Test | Result |
+  |---|---|
+  | Deploy | 17 resource changes in 112 seconds. The new index was added to the existing inference log table. |
+  | Review tasks | Three reviews (two low-confidence, one sampled) each wrote an OPEN task with a 668-character task token. |
+  | Access | No claims got 401. A user outside the `reviewers` group got 403. An unknown route got 404, and a bad task ID got 400. Groups passed as the HTTP API string (`[reviewers]`) and as a list both worked. |
+  | Claiming | Four reviewers claimed the tasks oldest first. A reviewer who already held a task got the same one back, and a fifth reviewer got none, with 0 waiting. The task data had no model label or confidence. |
+  | Image URL | The presigned URL returned the image with HTTP 200 and the right size, from the Regional endpoint. A URL with a changed expiry got 403. |
+  | Submitting | Another reviewer's task got 409, and an invalid label got 400. A low-confidence `aws_logo` answer was saved and copied to `images_labeled_by_folder/aws_logo/inference-image-6-80ac687a.png`. The next claim didn't return the submitted task, and a second submit got 409. A None of the above answer and a sampled answer were saved and not copied. |
+  | Releasing | A release reopened the task for the next reviewer. A second release got 409. |
+  | Duplicate review | Starting a review with an existing name failed with `ExecutionAlreadyExists`. |
+  | Expiry | With `Human-Review-Timeout-Hours` set to 0.02, the task timed out after 72 seconds. It was marked EXPIRED, taken out of the queue, and emailed, and the run failed with `ReviewExpired`. The timeout was then set back to 72. |
+  | Function | 22 calls, 32 ms on average, 450 ms cold start, 105 MB of memory. The logs had no task tokens or presigned URLs. |
+
+  H2 detection test, November 5, 2026, with the newest model running and `Human-Sampling-Interval` set to 2. Everything passed:
+
+  | Test | Result |
+  |---|---|
+  | Neither low confidence nor sampled | Detections 13 and 15 (80.5%) got no review. |
+  | Low confidence and sampled | Detection 14 (61.4%) got one low-confidence review, and the log recorded `HumanSampled`. |
+  | Sampled only | Detection 16 (80.5%) got a sampling review. |
+  | Low confidence only | With `Minimum-Label-Detection-Confidence` set to 100, detection 17 got a low-confidence review. Its image was named `Logo test (1)+é.png`. |
+  | Duplicate review | A detection run whose review name was already used caught `StepFunctions.ExecutionAlreadyExistsException`, logged the detection, and succeeded. |
+  | Labeling | Four reviews were labeled through the review API. The two low-confidence images were copied to `amazon_logo/h2-check-2-350f5f88.png` and `aws_logo/Logo test (1)+é-80ac687a.png`, so the encoded copy source works. The two sampled reviews were saved and not copied. |
+  | Emails | 3 low-confidence emails, all delivered. |
+
+  The model ran for about 7.5 minutes, from the start request to the stop, which is about $0.50. Both settings were restored, and no reviews are left waiting. The H2 tests left three test copies in the training folders: `aws_logo/inference-image-6-80ac687a.png`, `aws_logo/Logo test (1)+é-80ac687a.png`, and `amazon_logo/h2-check-2-350f5f88.png`.
+
+  Owner decisions, November 5, 2026: the Cognito user pool and `reviewers` group stay in H3, copies keep the ETag suffix, and an expired review emails and fails. Because the tests passed, H2 was squash-merged into `v2` without a separate review, and H3 started right away.
+- [ ] **H3.** Build the review portal: the Cognito user pool, the `reviewers` group, and the first reviewer (moved from H2), the Cognito app client and domain, the HTTP API and authorizer, the page bucket and CloudFront distribution, the review page, and the optional WAF web ACLs.
 - [ ] **H4.** Rewrite the README and sections 0, 1, 4, 5, 6, and 7, apply the DOC items, and redraw the diagrams. Section 1 switches from the CloudFormation console to running `cdk deploy` on the reader's computer. It lists the prerequisites and says that CloudShell isn't supported. The README explains that the first version used A2I and links the `v1-a2i` tag.
 
 ## Baseline updates
@@ -471,7 +519,7 @@ R2, R3, and the open F items are part of H1. R1 applies to the portal function i
 
 ### Runtime and code
 
-- [ ] **R1.** Use `python3.13` or `python3.14` for the portal function, which after D4 is the only Lambda function the sample owns. Today all 11 functions use `python3.9` (template L712). Lambda deprecated `python3.9` on December 15, 2025. It blocks creating functions with that runtime from July 29, 2027 and updating them from August 31, 2027. Skip `python3.10` and `python3.11`, which run on Amazon Linux 2.
+- [x] **R1.** Done in H2: the review API function uses `python3.14`. Use `python3.13` or `python3.14` for the portal function, which after D4 is the only Lambda function the sample owns. Today all 11 functions use `python3.9` (template L712). Lambda deprecated `python3.9` on December 15, 2025. It blocks creating functions with that runtime from July 29, 2027 and updating them from August 31, 2027. Skip `python3.10` and `python3.11`, which run on Amazon Linux 2.
 - [ ] **R2.** Handle the Custom Labels console trap. Today the sample trains with manifests (`lambda/train-deploy-model.py` L25-31). If anyone opens the project in the console after a model has been trained from manifests, the console creates datasets, and manifest training no longer works for that project. D7 fixes this in H1, because training uses datasets. 3-Model-Training step 13 can stay, with a note that dataset edits in the console are replaced on the next training run.
 - [ ] **R3.** Update the inference unit description. The current docs don't give a fixed TPS per inference unit. Remove "up to 5 TPS" from 2-Parameter-Store and from the `Minimum-Inference-Units` parameter description (template L496).
 
@@ -571,6 +619,8 @@ Decide each item separately.
 | 2026-11-04 | Adopted O1 (EventBridge Scheduler) and O4 (on-demand tables) for H1. Decided D9 (after a failed training run, wait for new images), D10 (email only milestones and problems), and D11 (no automated tests). Added `LastRunImageCount` to the D8 state item, the local branch flow and the H1 defaults to the build plan, and replaced the D4 note about TestState unit tests. Committed this tracker on the local `v2` branch and started H1 on `v2-h1`. |
 | 2026-11-04 | Wrote the H1 CDK app on `v2-h1`: one stack with the training, detection, settings, and cleanup state machines, the Scheduler schedule, on-demand tables, and the D10 emails. Removed the v1 template, the `lambda/` folder, and `assets/task_ui.html`. The app synthesizes and its definitions validate. It isn't deployed yet. Added the H1 status and implementation notes to the build plan. |
 | 2026-11-04 | Deployed H1 to the test account (us-west-2) and ran the test plan. Everything passed: two training runs (10 then 20 images, F1 1.0 both times), detection, settings changes, the one-run-at-a-time check, the failed-run rule, and the model swap. Fixed a double slash in the evaluation output keys and redeployed. Stopped both models. Cost about $3.70. The stack stays deployed for H2. |
+| 2026-11-05 | Squash-merged H1 into the local `v2` branch (`751b7ac`) and started H2 on `v2-h2`. Built the review workflow, the review queue index, five review settings, and the review API function (R1). Changed the detection workflow to start low-confidence and sampled reviews. Moved the Cognito user pool and the `reviewers` group to H3. Deployed to the test account, where the review workflow and the review API passed their tests without a running model. The detection-to-review test is still to run, and needs a running model. |
+| 2026-11-05 | Ran the H2 detection test with the newest model for about 7.5 minutes. All review paths passed: low confidence, sampling, both, neither, a duplicate review name, and a copy of an image named with spaces, a plus sign, and an accented character. Recorded the owner's decisions (Cognito in H3, the ETag suffix, and expired reviews email and fail), corrected the note about duplicate copies, and deleted the `v2-h1` branch. Squash-merged H2 into `v2` and started H3 on `v2-h3`. |
 
 ## Sources
 
