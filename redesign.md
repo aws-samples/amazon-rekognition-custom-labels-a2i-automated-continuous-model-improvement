@@ -21,7 +21,7 @@ This file tracks the work to bring the sample up to date. The work started with 
 | D12: AWS WAF | Decided November 5, 2026: not built. The docs can explain how to add it. |
 | Human review design | Approved November 4, 2026 |
 | Trial T1 | Done November 4, 2026. All seven checks passed, and the trial resources are deleted. |
-| Build (H0 to H4) | H0 done November 4, 2026. H1 to H3 done and squash-merged into the local `v2` branch November 5, 2026. H4 in progress on the local `v2-h4` branch. |
+| Build (H0 to H4) | H0 done November 4, 2026. H1 to H4 done and squash-merged into the local `v2` branch November 5, 2026, and `v2` merged into the local `main` branch. Nothing is pushed. |
 | Optional modernization | O1 and O4 adopted for H1, November 4, 2026. The other open items aren't decided. |
 
 ## Why the sample needs a redesign
@@ -541,7 +541,41 @@ Each phase is built on its own local branch (`v2-h1`, `v2-h2`, and so on), creat
   | Cleanup | The test users were deleted, and the stack was redeployed without the test flow in 13 seconds. |
 
   Browser walkthrough, November 5, 2026, by the owner. Passed: the owner signed in with the invitation's temporary password, set a new password (the account is now CONFIRMED), and labeled two waiting sampling reviews as None of the above. One was a Whole Foods Market logo and one was an AWS service icon, and neither label is in `Human-Review-Labels`. Both reviews were saved with the reviewer `chanles@amazon.com`, and neither image was copied. The function logged no errors.
-- [ ] **H4.** Rewrite the README and sections 0, 1, 4, 5, 6, and 7, apply the DOC items, and redraw the diagrams. Section 1 switches from the CloudFormation console to running `cdk deploy` on the reader's computer. It lists the prerequisites and says that CloudShell isn't supported. The README explains that the first version used A2I and links the `v1-a2i` tag.
+- [x] **H4.** Done November 5, 2026: squash-merged into `v2`, and `v2` merged into `main`. Rewrite the README and sections 0, 1, 4, 5, 6, and 7, apply the DOC items, and redraw the diagrams. Section 1 switches from the CloudFormation console to running `cdk deploy` on the reader's computer. It lists the prerequisites and says that CloudShell isn't supported. The README explains that the first version used A2I and links the `v1-a2i` tag.
+
+  H4 decisions, November 5, 2026:
+  - The repository isn't renamed. The organization's rules would require a `sample-` prefix for a new name.
+  - README title: "Automate continuous model improvement with Amazon Rekognition Custom Labels and human review".
+  - The July 2021 blog series isn't mentioned.
+  - Mermaid diagrams in the Markdown replace the PNG and draw.io files in `assets/`.
+  - The walkthrough uses AWS CLI commands, with short console notes and no screenshots.
+  - The eight numbered sections stay. `5-A2I-Human-Loop` becomes `5-Human-Review`.
+  - The finished docs are tested on a fresh stack, following them exactly from deployment to cleanup.
+
+  H4 status, November 5, 2026: done. Written on the local `v2-h4` branch and tested on a fresh stack in the test account.
+
+  H4 changes:
+  - README: the new title, a note about the first version that links the `v1-a2i` tag and says an old stack can't be upgraded in place, two Mermaid diagrams, costs, security, and the repository layout.
+  - Sections 0 to 7 are rewritten for the CDK version, with AWS CLI commands. Section 0 lists the 11 Regions, the running-model quota, and the tools, and says CloudShell isn't supported. Section 5 is now `5-Human-Review`.
+  - `CONTRIBUTING.md` links to this repository (DOC13).
+  - Removed the v1 diagrams in `assets/`, the screenshots, the v1 state machine definition in `stepfunctions/`, and `sample-images.zip`. Mermaid diagrams in the Markdown replace the diagrams (DOC14).
+  - All internal links and anchors, and 30 external links, pass a link check. The five Mermaid diagrams render with mermaid-cli 11.17.1.
+
+  H4 docs test, November 5, 2026, on a new stack named `CustomLabelsDocsTest`, deployed from a clone of `v2-h4`. The commands were run as written, with these differences: a local clone instead of GitHub, `--require-approval never` and `--force` instead of typing `y`, reviews labeled by calling the review API function (the owner checked the portal in H3), the test reviewer created with `--message-action SUPPRESS`, and the invitation `RESEND` not run, because it emails the owner. Everything passed after the fixes below:
+
+  | Section | Result |
+  |---|---|
+  | 1. Deployment | Deployed in 221 seconds. The variables block set all 9 variables. The first scheduled check ran during the deployment, 40 seconds after the schedule was created, and ended with "Not enough new images to train", without email. The docs said "right after the deployment" (fixed). |
+  | 2. Settings | The list showed the 11 defaults. A change worked, and a confidence of 101 and an interval of `1,000` were rejected. The state item doesn't exist until the first training run, so `get-item` printed nothing (docs fixed). |
+  | 3. Training | 10 images uploaded. The run took 31.6 minutes: 20.4 minutes of training (672 billable seconds), an F1 score of 1.0, and a 6-minute model start. Three emails: Training started, Training finished, and New model running. The docs said 15 minutes of training and 25 minutes in all (fixed). The model table's first column was `None`, because `DescribeProjectVersions` has no `VersionName` field (fixed). |
+  | 4. Detection | One image was detected 2 seconds after its upload, in 1.2 seconds, so `sleep 15` is enough. The output matched the docs. The 10 inference images gave 5 detections below 70%, 5 low-confidence emails, and 5 review tasks. Every log item had the 12 documented attributes. |
+  | 5. Human review | The user pool matches the docs: 12-character passwords and 7-day temporary passwords. The queue query showed the 5 tasks. They were claimed oldest first, without the model's label or confidence. Two images were labeled `aws_logo` and `amazon_logo` and copied, one as `aws_logo/inference-image-6-80ac687a.png`, the example name in the docs. Three were None of the above and weren't copied. Adding and removing a reviewer worked. The attribute table was missing `ReviewQueue`, `ReviewTaskToken`, and `ReviewClosed` (fixed). |
+  | 6. Human sampling | With an interval of 2, one of the two uploads got a sampling review. Its label matched the model's, and the accuracy scan printed it. The interval was set back to 1000. |
+  | 7. Cleanup | The model stopped in under a minute. A detection while it was stopped failed and emailed. It started again in 6 minutes. `cdk destroy` with the model running took 11 minutes 50 seconds, and the cleanup workflow stopped the model. That was the first test of stopping models on delete (F4). The kept resources were deleted with the docs' commands, each on the first try. |
+
+  Found and fixed during the test: the custom resource log group was left over after `cdk destroy`. CloudFormation deleted it, and 3 seconds later Lambda delivered the logs of the function's last Delete calls and created the group again, with the default role's `logs:CreateLogGroup` permission from `AWSLambdaBasicExecutionRole`. The custom resource function and the review API now have their own roles, which can only write to their own log groups. A second deployment with the fix passed a smoke test, and its deletion, in 4 minutes 54 seconds, left no log groups. The docs now give the deletion time as 5 to 15 minutes, because deleting the CloudFront distribution took 11 minutes the first time and 3 minutes the second.
+
+  Cost: about $2.20 at most. That's 11 billable training minutes (about $0.19) and about 30 minutes of model hosting (about $1.97), counted from each start request to its stop. Counted from when the model was running, hosting was 17 minutes (about $1.15). No test resources are left.
 
 ## Baseline updates
 
@@ -550,35 +584,35 @@ R2, R3, and the open F items are part of H1. R1 applies to the portal function i
 ### Runtime and code
 
 - [x] **R1.** Done in H2: the review API function uses `python3.14`. Use `python3.13` or `python3.14` for the portal function, which after D4 is the only Lambda function the sample owns. Today all 11 functions use `python3.9` (template L712). Lambda deprecated `python3.9` on December 15, 2025. It blocks creating functions with that runtime from July 29, 2027 and updating them from August 31, 2027. Skip `python3.10` and `python3.11`, which run on Amazon Linux 2.
-- [ ] **R2.** Handle the Custom Labels console trap. Today the sample trains with manifests (`lambda/train-deploy-model.py` L25-31). If anyone opens the project in the console after a model has been trained from manifests, the console creates datasets, and manifest training no longer works for that project. D7 fixes this in H1, because training uses datasets. 3-Model-Training step 13 can stay, with a note that dataset edits in the console are replaced on the next training run.
-- [ ] **R3.** Update the inference unit description. The current docs don't give a fixed TPS per inference unit. Remove "up to 5 TPS" from 2-Parameter-Store and from the `Minimum-Inference-Units` parameter description (template L496).
+- [x] **R2.** Done in H1 and H4: training uses datasets (D7), and section 3 says that dataset edits in the console are replaced on the next training run. Handle the Custom Labels console trap. Today the sample trains with manifests (`lambda/train-deploy-model.py` L25-31). If anyone opens the project in the console after a model has been trained from manifests, the console creates datasets, and manifest training no longer works for that project. D7 fixes this in H1, because training uses datasets. 3-Model-Training step 13 can stay, with a note that dataset edits in the console are replaced on the next training run.
+- [x] **R3.** Done in H1 and H4: the parameter description and section 2 don't give a TPS per unit. Update the inference unit description. The current docs don't give a fixed TPS per inference unit. Remove "up to 5 TPS" from 2-Parameter-Store and from the `Minimum-Inference-Units` parameter description (template L496).
 
 ### Defects
 
 - ~~**F1.** `create-training-manifest` opens `/tmp/manifest.txt` in append mode (template L920).~~ Superseded by D4. The Lambda function goes away, and a Distributed Map builds the manifest (D7).
 - ~~**F2.** Human sampling formats dates with `%-S` (`lambda/create_human_sampling.py` L19), which drops the zero padding.~~ Superseded by D6. Sampling no longer compares dates.
-- [ ] **F3.** `update-event-rules` builds `rate(1 minutes)` for a value of 1, which EventBridge rejects. It also calls `PutRule` without `State`. If only the frequency changes, that call re-enables a disabled schedule (`lambda/update-event-rules.py` L22-27). The settings state machine has to send `State` and build "minute" or "minutes".
-- [ ] **F4.** On stack deletion, CloudFormation deletes `ParameterSystemVariables` before the Rekognition custom resource. The custom resource's Delete handler then can't read the parameter, so it doesn't stop the running models. It still reports success. In H1, the cleanup workflow (D4) gets the project ARN directly instead of reading it from SSM.
+- [x] **F3.** Done in H1: the settings workflow builds `rate(1 minute)` and keeps the schedule's state, as the H1 test showed. `update-event-rules` builds `rate(1 minutes)` for a value of 1, which EventBridge rejects. It also calls `PutRule` without `State`. If only the frequency changes, that call re-enables a disabled schedule (`lambda/update-event-rules.py` L22-27). The settings state machine has to send `State` and build "minute" or "minutes".
+- [x] **F4.** Done in H1, and tested in the H4 docs test, where `cdk destroy` stopped a running model. On stack deletion, CloudFormation deletes `ParameterSystemVariables` before the Rekognition custom resource. The custom resource's Delete handler then can't read the parameter, so it doesn't stop the running models. It still reports success. In H1, the cleanup workflow (D4) gets the project ARN directly instead of reading it from SSM.
 - ~~**F5.** The custom resources don't set a `PhysicalResourceId`, and they swallow exceptions without logging them.~~ Superseded by D4. The sample no longer owns custom resource code, and CDK's built-in custom resource handles the folder placeholders and the cleanup.
 - ~~**F6.** `RekognitionProjectAssets` doesn't depend on `LambdaS3EventTriggerPermission`, so writing the S3 notification can fail intermittently.~~ Superseded by D4. S3 events go through EventBridge, so there's no Lambda notification or permission to order.
-- [ ] **F7.** Resource names use `!Select [6, !Split ['-', StackId]]`. If the stack name has exactly four hyphens, a `/` ends up in resource names and stack creation fails. Stack names longer than about 26 characters make Lambda function names exceed the 64-character limit. In H1, let CloudFormation generate the names.
-- [ ] **F8.** Align the training schedule's defaults. The rule uses `rate(600 minutes)` (template L544), but the SSM parameter defaults to 720 (L464). The sampling schedule goes away with D6.
+- [x] **F7.** Done in H1: CloudFormation generates the resource names, and the project name ends with the last segment of the stack ID. Resource names use `!Select [6, !Split ['-', StackId]]`. If the stack name has exactly four hyphens, a `/` ends up in resource names and stack creation fails. Stack names longer than about 26 characters make Lambda function names exceed the 64-character limit. In H1, let CloudFormation generate the names.
+- [x] **F8.** Done in H1: the schedule and the parameter both default to 720 minutes. Align the training schedule's defaults. The rule uses `rate(600 minutes)` (template L544), but the SSM parameter defaults to 720 (L464). The sampling schedule goes away with D6.
 
 ### Documentation
 
 - ~~**DOC1.** 1-Deployment step 4 names `rekognition-a2i-automate-workflow.yml`, but the file is `rekonginition-a2i-automate-workflow.yml`.~~ Superseded by D2. The template goes away, and H4 rewrites section 1 for `cdk deploy`.
-- [ ] **DOC2.** Update the service names:
+- [x] **DOC2.** Done in H4. The optional "Lambda Event Functions" name isn't used. Update the service names:
   - Amazon SageMaker is now Amazon SageMaker AI.
   - Amazon QuickSight is now Amazon Quick Sight, part of Amazon Quick Suite.
   - "AWS System Manager" in the architecture diagram and the template description should be AWS Systems Manager.
   - "Amazon Parameter Store" in sections 3, 6, and 7 should be AWS Systems Manager Parameter Store.
   - Optional: AWS docs now call standard functions "Lambda Event Functions".
-- [ ] **DOC3.** Remove the Mechanical Turk workforce option from the README intro.
-- [ ] **DOC4.** In the 0-Prerequisites Region list, drop the "June 2021" label and the duplicate Europe (Ireland) entry. The 11 Regions are still correct.
-- [ ] **DOC5.** 3-Model-Training step 15: the Step Functions "Graph inspector" is now **Graph view**.
-- [ ] **DOC6.** Remove the 0-Prerequisites screenshots. They date from January 2021, show an MTurk tab, and cover the private workforce setup, which option B removes.
-- [ ] **DOC7.** In 7-Conclusions-Cleanup steps 6 to 9, replace the console steps with the AWS CLI commands `stop-project-version`, `delete-project-version`, and `delete-project`.
-- [ ] **DOC8.** Fix the links:
+- [x] **DOC3.** Done in H4. Remove the Mechanical Turk workforce option from the README intro.
+- [x] **DOC4.** Done in H4. In the 0-Prerequisites Region list, drop the "June 2021" label and the duplicate Europe (Ireland) entry. The 11 Regions are still correct.
+- [x] **DOC5.** Done in H4. 3-Model-Training step 15: the Step Functions "Graph inspector" is now **Graph view**.
+- [x] **DOC6.** Done in H4, with all the other screenshots. Remove the 0-Prerequisites screenshots. They date from January 2021, show an MTurk tab, and cover the private workforce setup, which option B removes.
+- [x] **DOC7.** Done in H4, and the commands passed the docs test. In 7-Conclusions-Cleanup steps 6 to 9, replace the console steps with the AWS CLI commands `stop-project-version`, `delete-project-version`, and `delete-project`.
+- [x] **DOC8.** Done in H4. The Ground Truth and QuickSight links aren't needed anymore. Fix the links:
   - `customlabels-dg/gs-step-evaluate-model.html` (F1 score) → `customlabels-dg/im-metrics-use.html`
   - `customlabels-dg/rm-run-model.html` → `customlabels-dg/running-model.html`
   - `customlabels-dg/cd-manifest-files-object-detection.html` → `customlabels-dg/md-create-manifest-file-object-detection.html`
@@ -586,19 +620,19 @@ R2, R3, and the open F items are part of H1. R1 applies to the portal function i
   - `aws.amazon.com/sagemaker/groundtruth/` → `aws.amazon.com/sagemaker/ai/groundtruth/`
   - `aws.amazon.com/quicksight/` → `aws.amazon.com/quick/quicksight/`
   - `https:///aws.amazon.com/cognito/` (0-Prerequisites) → `https://aws.amazon.com/cognito/`
-- [ ] **DOC9.** Resolve the contradictions, and check that the rewritten sections agree on the new counts of parameters, state machines, and rules:
+- [x] **DOC9.** Done in H4. The docs agree with the template: 11 settings, five state machines, two EventBridge rules, and one schedule. Resolve the contradictions, and check that the rewritten sections agree on the new counts of parameters, state machines, and rules:
   - The README says "ten configurable parameters" and later "seven single-value parameters". There are 10. Section 2 counts 11 because it includes `For-System-Use-Only`.
   - The README says the state machine has "four separate states" and then describes five.
   - The README says "two EventBridge rules", but the template has three.
   - 3-Model-Training says the polling frequency is 600 minutes (see F8).
   - 3-Model-Training says new images must be "greater than" the minimum, but the code uses `>=`.
 - ~~**DOC10.** Fix the task UI.~~ Superseded by option B. The review page replaces the A2I task UI, and the labels come from `Human-Review-Labels`.
-- [ ] **DOC11.** Remove the duplicate code as part of H1. Delete `lambda/` and `assets/task_ui.html`, and keep the portal function's code in the CDK app. Today `lambda/` and `assets/task_ui.html` are copies that the template doesn't use, and `lambda/update-event-rules.py` L51 has a different SNS subject than the deployed code.
-- [ ] **DOC12.** Fix the typos:
+- [x] **DOC11.** Done in H1. Remove the duplicate code as part of H1. Delete `lambda/` and `assets/task_ui.html`, and keep the portal function's code in the CDK app. Today `lambda/` and `assets/task_ui.html` are copies that the template doesn't use, and `lambda/update-event-rules.py` L51 has a different SNS subject than the deployed code.
+- [x] **DOC12.** Done in H1 and H4: the rewritten docs and the new code don't have these typos. Fix the typos:
   - Docs: Prerequsites, Supprted, Recognition, amazon_log, EventBride, Labelsdetections, Customs Labelsmodel, Transaction Pers Second, qualify control, worfklow, Labelsconsole, DyanmoDB. Step 1 of 3-Model-Training also repeats its own sentence.
   - Template: configurrable, Rekongition (state names), Internval, paramater-store, RekogntionProjectArn, Preject, Autmatic. Don't carry these into the new state machines in H1.
-- [ ] **DOC13.** In `CONTRIBUTING.md`, replace the `${GITHUB_REPO}` placeholders and the `awsdocs` organization with `aws-samples/amazon-rekognition-custom-labels-a2i-automated-continuous-model-improvement`.
-- [ ] **DOC14.** Redraw the architecture, workflow, and state machine diagrams in `assets/` for the new state machines and the review components, and fix the old labels "AWS System Manager" and "Amazon SageMaker".
+- [x] **DOC13.** Done in H4. In `CONTRIBUTING.md`, replace the `${GITHUB_REPO}` placeholders and the `awsdocs` organization with `aws-samples/amazon-rekognition-custom-labels-a2i-automated-continuous-model-improvement`.
+- [x] **DOC14.** Done in H4: Mermaid diagrams in the Markdown replace `assets/`. Redraw the architecture, workflow, and state machine diagrams in `assets/` for the new state machines and the review components, and fix the old labels "AWS System Manager" and "Amazon SageMaker".
 
 ## Optional modernization
 
@@ -622,9 +656,10 @@ Decide each item separately.
 
 ## Open questions and risks
 
-- The repository name and the README title both mention A2I. Should the repository be renamed (GitHub redirects the old URL) and the sample retitled?
-- The two-part AWS Machine Learning Blog series from July 2021 describes the A2I design. Should it be updated, given a note, or left as is?
-- Which account and Region can we use for T1 and the test deployments? Training a model takes about an hour and incurs training and inference charges.
+- ~~The repository name and the README title both mention A2I. Should the repository be renamed?~~ Decided November 5, 2026: no rename, and the README gets a new title (H4 decisions).
+- ~~The two-part AWS Machine Learning Blog series from July 2021 describes the A2I design. Should it be updated, given a note, or left as is?~~ Decided November 5, 2026: the docs don't mention it.
+- ~~Which account and Region can we use for T1 and the test deployments?~~ Answered November 4, 2026: the owner's test account, in us-west-2.
+- An account can run at most 2 Custom Labels models at a time, by default. A retrain starts the new model before it stops the old one, so the docs have to say that the account needs room for a second running model.
 - Existing deployments can't be upgraded in place, because the A2I resources go away and the stack moves to CDK. The docs should tell existing users to delete the old stack and deploy the new one. The old stack's bucket and table are retained.
 - The console labels in Rekognition Custom Labels haven't been checked, because checking them requires signing in.
 - Rekognition Custom Labels has no announced change, but its developer guide history lists no updates after April 19, 2023. Check the AWS lifecycle pages again before starting H2.
@@ -653,6 +688,8 @@ Decide each item separately.
 | 2026-11-05 | Ran the H2 detection test with the newest model for about 7.5 minutes. All review paths passed: low confidence, sampling, both, neither, a duplicate review name, and a copy of an image named with spaces, a plus sign, and an accented character. Recorded the owner's decisions (Cognito in H3, the ETag suffix, and expired reviews email and fail), corrected the note about duplicate copies, and deleted the `v2-h1` branch. Squash-merged H2 into `v2` and started H3 on `v2-h3`. |
 | 2026-11-05 | Built the H3 review portal on `v2-h3`: the Cognito user pool, `reviewers` group, first reviewer, app client, and managed login domain, the HTTP API with a JWT authorizer, and the review page in a private bucket behind CloudFront. Deployed it to the test account and tested it by script with real Cognito tokens. The invitation email went to the notification address. Created two waiting review tasks for the owner's browser walkthrough. The optional WAF isn't built yet. |
 | 2026-11-05 | The owner's browser walkthrough passed: sign-in with the invitation, a password change, and two reviews labeled None of the above. Decided D12 (don't build AWS WAF) and updated the design. Added the rule that phase branches are deleted after their squash-merge, and deleted `v2-h2`. Squash-merged H3 into `v2`, deleted `v2-h3`, and started H4 on `v2-h4`. |
+| 2026-11-05 | Wrote H4 on `v2-h4`: the README and sections 0 to 7 for the CDK version, with Mermaid diagrams instead of `assets/`, and section 5 renamed to `5-Human-Review`. Removed the v1 screenshots, diagrams, state machine definition, and sample image zip. Recorded the owner's H4 decisions. |
+| 2026-11-05 | Tested the docs on a fresh stack, `CustomLabelsDocsTest`, from deployment to cleanup, and fixed the docs where the test differed (see H4). The test also found that `cdk destroy` left the custom resource log group behind. Gave both Lambda functions roles without `logs:CreateLogGroup`, and a second deployment and deletion left no log groups. The test cost about $2.20 at most, and no test resources are left. Marked H4, R2, R3, F3, F4, F7, F8, and the open DOC items done. Squash-merged H4 into `v2`, deleted `v2-h4`, and merged `v2` into the local `main` branch. Nothing is pushed. |
 
 ## Sources
 

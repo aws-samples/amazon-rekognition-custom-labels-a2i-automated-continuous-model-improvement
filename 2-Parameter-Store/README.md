@@ -1,22 +1,59 @@
-## 2 Understanding the parameters
+# 2. Settings
 
-Because model performance can change over inference results, you need to implement an automated ML workflow that can continuously retrain a model with newly captured and human-labeled images. In addition, you need to consider adding flexibility into the ML workflow to allow for change without requiring development rework as business objectives evolve over time. Developing a customizable ML workflow that behaves similar to a business rule engine requires significant upfront investment, which can be a resource challenge.
+The workflow's settings are 11 parameters in AWS Systems Manager Parameter Store, under `/CustomLabelsModelImprovement/`. Each workflow reads the settings it needs every time it runs, so a change applies to the next run. You don't need to redeploy.
 
-In this demo, we provide a set of configurable parameters for you to use to customize the ML workflow. Go to [AWS Systems Manager Parameter Store](https://console.aws.amazon.com/systems-manager/parameters). You should see a list of 11 parameters as shown below:
+## List the settings
 
-- **Automatic-Human-Sampling-Frequency** - This is the polling frequency (in integer minutes) on how often the [Amazon EventBridge](https://aws.amazon.com/eventbridge/) Schedule rule is triggered to initiate the check for human sampling. As you update this value, the value is applied to the rule by an [AWS Lambda](https://aws.amazon.com/lambda) function.
-- **Automatic-Training-Poll-Frequency** - This is the polling frequency (in integer minutes) on how often the [Amazon EventBridge](https://aws.amazon.com/eventbridge/) Schedule rule is triggered to initiate the check for automatic model training. As you update this value, the value is applied to the rule by an [AWS Lambda](https://aws.amazon.com/lambda) function.
-- **Enable-A2I-Workflow** - This value (`true/false`) determines whether an [Amazon SageMaker](https://docs.aws.amazon.com/sagemaker/latest/dg/a2i-start-human-loop.html) Human Loop is created when the inference confidence level from the [Amazon Rekognition Custom Labels](https://aws.amazon.com/rekognition/custom-labels-features/) detection result is less than the [minimum confidence](https://docs.aws.amazon.com/rekognition/latest/customlabels-dg/detecting-custom-labels.html) as set in the **Minimum-Label-Detection-Confidence** parameter.
-- **Enable-Automatic-Human-Sampling** - This value (`true/false`) determines whether automatic human sampling is `enabled/disabled`. When this value is updated to `true`, a Lambda function enables the EventBride Schedule rule. When the value is updated to `false`, a Lambda function disables the EventBride Schedule rule.
-- **Enable-Automatic-Training** - This value (`true/false`) determines whether automatic model training is `enabled/disabled`. When this value is updated to `true`, a Lambda function enables the EventBride Schedule rule. When the value is updated to `false`, a Lambda function disables the EventBride Schedule rule.
-- **For-System-Use-Only** - Do **NOT** modify this value. This is a reserved parameter consisting of environmental variables and operation data. The value is used and updated by Lambda functions.
-- **Human-Sampling-Interval** - This value (Int) represents the minimum number of new Rekognition Custom Labelsdetections since the last human sampled detection before a new human sample is needed. If a new detection meets the interval requirement, it is marked for human sampling. An Amazon A2I human workflow is created, if a human workflow does not exist already.
-- **Minimum-F1-Score** - This value is the minimum [F1 score](https://docs.aws.amazon.com/rekognition/latest/customlabels-dg/gs-step-evaluate-model.html) (Float 0.00-1.00) that determines whether a newly trained model is acceptable for deployment. If the **F1 score** of the trained Model is greater or equal to the **Minimum-F1-Score** value, the model will be deployed. If not, the model is marked as failed training.
-- **Minimum-Inference-Units** - This value (Int), with a minimum of `1`, is number of [inference unit](https://docs.aws.amazon.com/rekognition/latest/customlabels-dg/rm-run-model.html) to use for the running Rekognition Customs Labelsmodel. A single inference unit represents 1 hour of processing and can support up to 5 Transaction Pers Second (TPS). Use a higher number to increase the TPS throughput of your model. You are charged for the number of inference units that you use.
-- **Minimum-Label-Detection-Confidence** - Rekognition Custom Labels returns a **Confidence** between 0-100 on each detection. The **Minimum Confidence** (Float 0.00-100.00) determines whether a detection result is acceptable. If the detection **Confidence** is greater than or equal to the **Minimum Confidence**, then the detection is accepted. If not, the image is sent to [Amazon Augmented AI](https://aws.amazon.com/augmented-ai/) (Amazon A2I) human labeling process, provided that **Enable-A2I-Workflow** is `enabled`.
-- **Minimum-Untrained-Images** - This value (Int) represents the minimum number of untrained or newly added images that will qualify the state machine to start a new model training process. At the instance the polled event is triggered, a Lambda function first determines the total number of training images in the designated S3 folder. Next it retrieves the value `previous_trained_images` from the parameter **For-System-Use-Only**. If the difference between the total number of images in S3 and the previous_trained_images is greater than or equal to minimum untrained images, then it will trigger a new model training. On a successful training, a Lambda function updates the `previous_trained_images` with the current total number of images trained.
+```bash
+aws ssm get-parameters-by-path --path "/$STACK/" \
+  --query "Parameters[].[Name,Value]" --output table
+```
 
+## Change a setting
 
-**Note:** The Parameter store uses string to store value regardless of type. Do **NOT** use comma separator for numeric values.
+```bash
+aws ssm put-parameter --name "/$STACK/Minimum-F1-Score" --value 0.9 --overwrite
+```
 
-Next Step: [3-Model-Training](../3-Model-Training/)
+Each parameter has an allowed pattern, so Parameter Store rejects a value that isn't valid, such as a confidence above 100 or a number with a thousands separator. You can also change the settings on the [Parameter Store console](https://console.aws.amazon.com/systems-manager/parameters).
+
+## The settings
+
+### Training
+
+| Setting | Default | Allowed values | What it does |
+|---|---|---|---|
+| `Enable-Automatic-Training` | `true` | `true` or `false` | Turns the training schedule on or off. A training run that you start yourself always trains. |
+| `Automatic-Training-Poll-Frequency` | `720` | Whole minutes, 1 or more | How often the schedule starts a training check. The default is every 12 hours. |
+| `Minimum-Untrained-Images` | `10` | Whole number, 1 or more | How many images must be added since the last training run before a scheduled check trains a new model. |
+| `Minimum-F1-Score` | `0.8` | 0 to 1 | The lowest [F1 score](https://docs.aws.amazon.com/rekognition/latest/customlabels-dg/im-metrics-use.html) that a new model needs before it's started and replaces the running model. |
+| `Minimum-Inference-Units` | `1` | Whole number, 1 or more | The number of [inference units](https://docs.aws.amazon.com/rekognition/latest/customlabels-dg/running-model.html) to start a new model with. More units handle more images per second. You're charged for each unit while the model runs. By default, a model can use at most 5 units. |
+
+When you change `Enable-Automatic-Training` or `Automatic-Training-Poll-Frequency`, the settings workflow updates the EventBridge Scheduler schedule within a few seconds and emails you the new schedule. The schedule can start a check right after it's updated. If no new images are waiting, the check ends without training.
+
+### Detection and human review
+
+| Setting | Default | Allowed values | What it does |
+|---|---|---|---|
+| `Minimum-Label-Detection-Confidence` | `70.0` | 0 to 100 | The lowest confidence for a detection to be accepted. A detection below it is marked as low confidence in the inference log, emailed, and sent to human review when `Enable-Human-Review` is `true`. |
+| `Enable-Human-Review` | `true` | `true` or `false` | Sends low-confidence detections to human review. After a reviewer labels a low-confidence image, the image is added to the training images. |
+| `Enable-Automatic-Human-Sampling` | `true` | `true` or `false` | Sends every Nth detection to human review, whatever its confidence, to check the model's accuracy. Sampled images aren't added to the training images. |
+| `Human-Sampling-Interval` | `1000` | Whole number, 1 or more | The N for human sampling. |
+| `Human-Review-Labels` | `amazon_logo,aws_logo` | Labels separated by commas, each made of letters, digits, underscores, and hyphens | The labels that reviewers choose from. Each label is also a folder name under `images_labeled_by_folder/`. Reviewers also get a **None of the above** choice. The review page picks up a change within a minute. |
+| `Human-Review-Timeout-Hours` | `72` | Hours, with up to 2 decimals | How long a review task waits for a reviewer before it expires. The shortest timeout is 1 minute. A change applies to new review tasks. |
+
+## Run-time state
+
+The workflows keep their run-time state in one item of the stack's DynamoDB state table, not in Parameter Store: the running model, its F1 score, the image counts of the last training runs, and the detection counter for sampling. You don't need to edit it. To see it:
+
+```bash
+aws dynamodb get-item --table-name "$STATE_TABLE" --key '{"StateId": {"S": "current"}}'
+```
+
+The first training run creates the item, so until then the command prints nothing.
+
+## Stack updates
+
+A stack update keeps your settings. One exception: if an update changes the schedule itself, for example after you change the sample's code, the schedule goes back to every 720 minutes and on. To fix that, set `Automatic-Training-Poll-Frequency` or `Enable-Automatic-Training` again after the update.
+
+Next: [Model training](../3-Model-Training/)

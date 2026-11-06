@@ -213,6 +213,13 @@ class ModelImprovementStack(Stack):
         custom_resource_logs = logs.LogGroup(
             self, "CustomResourceLogs", retention=STANDARD_RETENTION, removal_policy=RemovalPolicy.DESTROY
         )
+        # The function's role can write to that log group but can't create log groups. Lambda
+        # delivers the logs of the last Delete calls a few seconds late, and with the default
+        # role's logs:CreateLogGroup it recreated the deleted log group (H4 docs test finding).
+        custom_resource_role = iam.Role(
+            self, "CustomResourceRole", assumed_by=iam.ServicePrincipal("lambda.amazonaws.com")
+        )
+        custom_resource_logs.grant_write(custom_resource_role)
 
         # Folder placeholders, so the folders show up in the S3 console for uploads.
         for folder_id, folder in (("TrainingFolder", TRAINING_IMAGES_PREFIX), ("DetectionFolder", DETECTION_IMAGES_PREFIX)):
@@ -231,6 +238,7 @@ class ModelImprovementStack(Stack):
                 ),
                 install_latest_aws_sdk=False,
                 log_group=custom_resource_logs,
+                role=custom_resource_role,
             )
 
         # State machines -------------------------------------------------------------------
@@ -374,6 +382,9 @@ class ModelImprovementStack(Stack):
         review_api_logs = logs.LogGroup(
             self, "ReviewApiLogs", retention=STANDARD_RETENTION, removal_policy=RemovalPolicy.DESTROY
         )
+        # No logs:CreateLogGroup, for the same reason as the custom resource role.
+        review_api_role = iam.Role(self, "ReviewApiRole", assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"))
+        review_api_logs.grant_write(review_api_role)
         review_api = lambda_.Function(
             self,
             "ReviewApi",
@@ -385,6 +396,7 @@ class ModelImprovementStack(Stack):
             memory_size=256,
             timeout=Duration.seconds(10),
             log_group=review_api_logs,
+            role=review_api_role,
             environment={
                 "TABLE_NAME": inference_log.table_name,
                 "QUEUE_INDEX": REVIEW_QUEUE_INDEX,
@@ -410,6 +422,7 @@ class ModelImprovementStack(Stack):
             first_reviewer_email=notification_email.value_as_string,
             name_suffix=stack_id_suffix,
             log_group=custom_resource_logs,
+            custom_resource_role=custom_resource_role,
             test_sign_in=self.node.try_get_context("reviewerTestSignIn") in (True, "true"),
         )
 
@@ -506,6 +519,7 @@ class ModelImprovementStack(Stack):
             ),
             install_latest_aws_sdk=False,
             log_group=custom_resource_logs,
+            role=custom_resource_role,
             timeout=Duration.minutes(5),
         )
 

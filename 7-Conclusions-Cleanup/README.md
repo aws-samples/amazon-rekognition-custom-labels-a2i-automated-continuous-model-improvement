@@ -1,36 +1,83 @@
-## 7 Conclusion and cleanup resources
+# 7. Conclusions and cleanup
 
-**Conclusions**  
-In this demo we explained how to build an automated and configurable continuous model improvement workflow for [Amazon Rekognition Custom Labels](https://aws.amazon.com/rekognition/custom-labels-features/) and [Amazon Augmented AI](https://aws.amazon.com/augmented-ai/) (Amazon A2I). By incorporating [Amazon Parameter Store](https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-parameter-store.html), we demonstrated how to use parameters as variables for [AWS Step Functions](https://aws.amazon.com/step-functions/) to customize the behaviors of the ML workflow without needing development rework. We walked through the steps to deploy the solution with [AWS CloudFormation](https://aws.amazon.com/cloudformation/) and completed an end-to-end process to train and deploy a Rekognition Custom Labels model, perform custom label detection, create and complete Amazon A2I human labeling tasks, and generate human samples.
+You trained a Rekognition Custom Labels model from labeled S3 folders, ran detection on new images, labeled the images that the model was unsure about, and sampled detections to check the model's accuracy. Reviewed images flow back into the training folders, and the training workflow trains, checks, and replaces the model when enough new images arrive.
 
-Things to consider to enhance this worfklow:
-- Add additional parameters to control the behaviors of this workflow.
-- Build a web interface for the Model Operator and Model Consumer for:
-  - Uploading images to [Amazon S3](https://aws.amazon.com/s3/)
-  - Modifying Parameter Store values
-  - Fan out the [Amazon Simple Notification Service](https://aws.amazon.com/sns/) (Amazon SNS) topic to integrate other AWS services
+## Stop the model to save costs
 
-**Clean up**  
-Complete the following steps to clean up the AWS resources that we created as part of this post to avoid potential recurring charges.
+A running model costs $4 an hour for each inference unit, even when it isn't checking images. If you keep the stack, stop the model when you don't need it:
 
-1. On the [CloudFormation](https://console.aws.amazon.com/cloudformation) console, choose the stack you used in this demo.
-2. Choose **Delete** to delete the stack.
+```bash
+MODEL_ARN=$(aws dynamodb get-item --table-name "$STATE_TABLE" --key '{"StateId": {"S": "current"}}' \
+  --query "Item.RunningModelArn.S" --output text)
+aws rekognition stop-project-version --project-version-arn "$MODEL_ARN"
+```
 
-The following resources are not deleted by CloudFormation:
-  - S3 bucket
-  - Rekognition Custom Labels project & models
-  - DynamoDB table
-  - [Amazon SageMaker Ground Truth](https://aws.amazon.com/sagemaker/groundtruth/) private workforce
+While the model is stopped, detection fails and emails you for each new image. To start the model again, which takes about 6 minutes:
 
-3. On the S3 console, choose the bucket you used for this post.
-4. Choose **Empty**.
-5. Choose **Delete**
-6. On the Rekognition Custom Labelsconsole, choose the running model.
-7. On the **Evaluate and use model** tab, expand the **API Code** section.
-8. Run the [AWS Command Line Interface](https://aws.amazon.com/cli) (AWS CLI) stop model command.
-9.	On the **Projects** page, select the project and choose **Delete**.
-10. On the DyanmoDB console, select the table you used for this post.
-11. Choose **Delete**
-12.	To delete the private workforce, enter the following code (leave the workforce name as `default` and provide your Region):  
+```bash
+aws rekognition start-project-version --project-version-arn "$MODEL_ARN" --min-inference-units 1
+```
 
-  `aws sagemaker delete-workforce --workforce-name default --region your-region-x`
+## Delete the stack
+
+1. Set the variables from [section 1](../1-Deployment/README.md#set-the-variables-for-the-next-sections), if they aren't set. They come from the stack's outputs, so set them before you delete the stack. The later steps need them.
+2. Delete the stack from the repository folder, with the virtual environment active. Enter `y` to confirm.
+
+   ```bash
+   npx cdk destroy
+   ```
+
+   If you deployed with another stack name, add `-c stackName=AnotherName`. Before the stack's resources are deleted, the cleanup workflow stops the project's running models. Deleting the stack takes 5 to 15 minutes, mostly for the CloudFront distribution.
+
+The stack deletes its workflows, the state table, the settings, the log groups, the review portal, and the Cognito user pool with its users. It keeps your data, so that you don't lose images, results, or models by accident:
+
+- The S3 bucket, with the training images, the detection images, the manifests, and the evaluation results
+- The inference log table, with every detection and review
+- The Custom Labels project and its models, all stopped
+
+## Delete the kept resources
+
+These commands delete your data, and you can't undo them.
+
+1. Delete the project's models and datasets, and then the project. Deleting each model takes a moment, and the project can be deleted only after they're gone.
+
+   ```bash
+   PROJECT_NAME=$(echo "$PROJECT_ARN" | cut -d/ -f2)
+   for model in $(aws rekognition describe-project-versions --project-arn "$PROJECT_ARN" \
+       --query "ProjectVersionDescriptions[].ProjectVersionArn" --output text); do
+     aws rekognition delete-project-version --project-version-arn "$model"
+   done
+   for dataset in $(aws rekognition describe-projects --project-names "$PROJECT_NAME" \
+       --query "ProjectDescriptions[0].Datasets[].DatasetArn" --output text); do
+     aws rekognition delete-dataset --dataset-arn "$dataset"
+   done
+   sleep 60
+   aws rekognition delete-project --project-arn "$PROJECT_ARN"
+   ```
+
+   If `delete-project` reports that the project still has models or datasets, wait a minute and run it again.
+
+2. Delete the inference log table:
+
+   ```bash
+   aws dynamodb delete-table --table-name "$LOG_TABLE"
+   ```
+
+3. Delete the bucket and everything in it:
+
+   ```bash
+   aws s3 rb "s3://$BUCKET" --force
+   ```
+
+The `CDKToolkit` stack from bootstrapping stays in the account. Other CDK apps in the same account and Region use it, so keep it unless you know that nothing else needs it.
+
+## Next steps
+
+To take this further:
+
+- Add AWS WAF to the CloudFront distribution and the Cognito user pool.
+- Add Amazon CloudWatch alarms for failed workflow runs, in addition to the emails.
+- Let reviewers label objects with bounding boxes, or have more than one reviewer label each image.
+- Keep the Cognito user pool when the stack is deleted, if your reviewer accounts need to outlive the stack.
+
+Back to the [overview](../README.md).

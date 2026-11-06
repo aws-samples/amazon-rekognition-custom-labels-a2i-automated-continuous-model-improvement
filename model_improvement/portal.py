@@ -47,6 +47,7 @@ class ReviewPortal(Construct):
         first_reviewer_email: str,
         name_suffix: str,
         log_group: logs.ILogGroup,
+        custom_resource_role: iam.IRole,
         test_sign_in: bool = False,
         web_acl_arn: str | None = None,
     ) -> None:
@@ -284,4 +285,5 @@ class ReviewPortal(Construct):
                 ),
                 install_latest_aws_sdk=False,
                 log_group=log_group,
+                role=custom_resource_role,
             )

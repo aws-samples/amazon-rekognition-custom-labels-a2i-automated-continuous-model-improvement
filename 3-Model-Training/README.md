@@ -1,63 +1,90 @@
-## 3 Train and deploy your model
+# 3. Model training
 
-For this demo, we want to build an [Amazon Rekognition Custom Labels](https://aws.amazon.com/rekognition/custom-labels-features/) model for brand detection with training images. As we start using the model, we capture inference images with low detection confidence for human labeling. Captured images that can be properly labeled are added to the training images for model training as part the of continuous model improvement process.
+The training images are in S3, one folder per label, under `images_labeled_by_folder/`. The folder name is the label. This sample starts with five Amazon logos and five AWS logos, in `sample-images/amazon_logo` and `sample-images/aws_logo`, which train a model with the labels `amazon_logo` and `aws_logo`.
 
-Rekognition Custom Labels supports two methods of labeling datasets: [object-level labeling](https://docs.aws.amazon.com/rekognition/latest/customlabels-dg/cd-manifest-files-object-detection.html) and [image-level labeling](https://docs.aws.amazon.com/rekognition/latest/customlabels-dg/rv-assign-labels.html). This demo uses the `image-level labeling` method.
+## Upload the training images
 
-We use Amazon and AWS logos for our initial training images. The images are located in the `sample-images` folder. We use the folder name as the label such that images in the **amazon_logo** and **aws_logo** folders are labeled `amazon_log` and `aws_logo`, respectively.
+Run these commands from the repository folder, with the variables from [section 1](../1-Deployment/README.md#set-the-variables-for-the-next-sections) set.
 
-In this section, we walk you through the steps to add training images to [Amazon Simple Storage Service](https://aws.amazon.com/s3) (Amazon S3)  and explain how the automatic model training process works.
+```bash
+for label in amazon_logo aws_logo; do
+  aws s3 cp "sample-images/$label/" "s3://$BUCKET/images_labeled_by_folder/$label/" --recursive --exclude ".*"
+done
+aws s3 ls "s3://$BUCKET/images_labeled_by_folder/" --recursive
+```
 
-1. On the [Amazon S3](https://s3.console.aws.amazon.com/s3/home) console, choose the bucket with the name similar to `yourstackname-s3bucket-esxhty0wyhqu`.  and select the bucket with name similar to "yourstackname-s3bucket-esxhty0wyhqu". You should see 5 folders:
-  - a2i-human-loop-data/
-  - evaluation/
-  - images_for_detection/
-  - images_labeled_by_folder/
-  - manifests/
-2. Choose the folder `images_labeled_by_folder`.
-3. Choose **Upload** and then **Add folder**.
-4. When prompted to select images from your computer, choose the `amazon_logo` folder, not the images inside the folder.
-5. Repeat these steps to add the `aws_logo` folder.
-6. Choose **Upload**.
+You should see 10 images in two folders. Only `.jpg`, `.jpeg`, and `.png` files directly inside a label folder are used. The workflow skips other files and deeper subfolders.
 
-You should now have two folders and 10 images, as shown in the S3 `images_labeled_by_folder` folder.
-![S3 Folder Image](s3-folder-2.png)
+## Start a training run
 
-At this point, we have 10 training images, which meets the minimum of 10 new images (as currently set in Parameter Store) to qualify for new model training. When the [Amazon EventBridge](https://aws.amazon.com/eventbridge/) schedule rule triggers to invoke the [AWS Step Functions](https://aws.amazon.com/step-functions/) state machine to check for new training, it initiates a full model training and deployment process. Because the current schedule rule polling frequency is 600 minutes, the schedule rule doesn’t trigger in the time frame of this demo. We manually trigger the schedule rule for the sole purpose of this demo only.
+The schedule checks for new images every 12 hours. To train now, start the training workflow yourself:
 
-7.	On the [Amazon Parameter Store](https://console.aws.amazon.com/systems-manager/parameters) console, choose the `Enable-Automatic-Training parameter`.
-8.	Choose **Edit**.
-9.	Update the value to `false` and choose **Save changes**.
-10.	Choose **Edit** again.
-11.	Update the value back to `true` and choose **Save changes**.
+```bash
+RUN=$(aws stepfunctions start-execution --state-machine-arn "$TRAINING" --query executionArn --output text)
+echo "$RUN"
+```
 
-This resets the schedule rule to initiate an event to send to Step Functions to check the conditions for new model training. You should also receive three separate emails, two indicating that you updated a parameter and one indicating that automatic training is checked.
+A run that you start yourself always trains, even if fewer than `Minimum-Untrained-Images` images were added and even if automatic training is off. It ends right away if another training run is in progress, because only one runs at a time.
 
-Wait for the model training and deployment to complete. This should take approximately 1 hour. You should receive periodic emails on model training and deployment status. The model is deployed when you receive an email with the message “Status: RUNNING.”
+## What the training workflow does
 
-12. Choose the parameter `For-System-Use-Only` on the Parameter Store console.
+```mermaid
+flowchart TD
+    start(["Start"]) --> check{"Enough new images?<br/>Scheduled runs only"}
+    check -->|"No"| done(["End, no training"])
+    check -->|"Yes"| manifest["Build a manifest from the label folders"]
+    manifest --> datasets["Delete the old datasets, create a training dataset,<br/>and move 20% of the images to a test dataset"]
+    datasets --> train["Train a model and email: Training started"]
+    train --> f1{"F1 score at least<br/>Minimum-F1-Score?"}
+    f1 -->|"No"| failed(["Email: Model not started"])
+    f1 -->|"Yes"| startmodel["Email: Training finished<br/>Start the new model"]
+    startmodel --> swap["Save it as the running model,<br/>and stop the model it replaces"]
+    swap --> running(["Email: New model running"])
+```
 
-The `previous_trained_images` value should be 0 as Rekognition Custom Labels has not completed the training yet.
+1. **Count the images.** A scheduled run continues only if automatic training is on and at least `Minimum-Untrained-Images` images were added since the last training run.
+2. **Rebuild the datasets.** The workflow writes a manifest that labels each image with its folder name, deletes the project's old datasets, and creates a new training dataset from the manifest. Then it moves 20% of the images, from every label, into a new test dataset. Rebuilding takes about a minute.
+3. **Train.** Training the sample's 10 images takes 15 to 20 minutes. You get a **Training started** email. The workflow checks on the training every 5 minutes. Rekognition writes the evaluation results to `evaluation/` in the bucket.
+4. **Evaluate.** If the model's F1 score is at least `Minimum-F1-Score`, you get a **Training finished** email, and the workflow starts the model with `Minimum-Inference-Units` units. Starting a model takes about 6 minutes.
+5. **Replace the running model.** The workflow saves the new model as the running model, so detection uses it right away. Then it stops the model that it replaced and emails **New model running**. Stopped models stay in the project. Section 7 shows how to delete them.
 
-13.	As an optional step, go to the **Projects** page on the Rekognition Custom Labels console to review the model status and training details.
+A first run takes about 30 minutes. To follow it:
 
-If you’re redirected to a different Region, switch to the correct Region.
+```bash
+aws stepfunctions describe-execution --execution-arn "$RUN" --query status --output text
+aws rekognition describe-project-versions --project-arn "$PROJECT_ARN" \
+  --query "ProjectVersionDescriptions[].{Created: CreationTimestamp, Status: Status, F1: EvaluationResult.F1Score}" \
+  --output table
+```
 
-14.	As another optional step, choose the state machine on the Step Functions console.
+The [Step Functions console](https://console.aws.amazon.com/states/home) shows each run's steps. Choose the training state machine, choose a run, and look at **Graph view**.
 
-You should see a list of runs and associated statuses.
+When the run finishes, the status is `SUCCEEDED`, and the model's status is `RUNNING`. The model is now billed by the hour, so if you stop here, stop it as shown in [section 7](../7-Conclusions-Cleanup/).
 
-15.	Choose any run to review the details and choose **Graph inspector**.
+## When the next model is trained
 
-The state machine records every run so you can always refer back to troubleshoot issues.
+A scheduled check trains a new model when all of these are true:
 
-Now that your initial model has been trained and deployed, let’s check the `previous_trained_images` value again. The value should be updated automatically to 10, which represents the 10 images you used in this initial model training. On successful model training, an [AWS Lambda](https://aws.amazon.com/lambda/) function updates the value to the total number of images used for training.
+- `Enable-Automatic-Training` is `true`.
+- At least `Minimum-Untrained-Images` (10) images were added since the last training run. After this first run with 10 images, a scheduled check trains again when there are 20 or more.
+- No other training run is in progress.
 
-For new model training to begin, it needs to meet three conditions in the following order:
+Reviewed images count as added images, because the review workflow copies them into the label folders ([section 5](../5-Human-Review/)).
 
-1.	Automatic training is enabled in Parameter Store. If disabled, the schedule rule isn’t triggered to check the training.
-2.	The schedule rule triggers next to check for training based on the set frequency. Because the frequency is current set at 600 minutes, the schedule rule doesn’t trigger in the timeline of this demo.
-3.	When checking for training, the number of new images added since the last successful training must be greater than the minimum untrained images (currently set at 10) for new training to start. Because you trained 10 images in the initial training, you need 10 new labeled images, for a total of 20 images.
+## When training fails
 
+If the model's F1 score is below `Minimum-F1-Score`, you get an email that says **Model not started: F1 score below minimum**, and the running model stays as it is. Other failures, such as a dataset error, send a **Training failed** email with the error and a link to the run.
 
-Next Step: [4-Custom-Labels-Detection](../4-Custom-Labels-Detection/)
+After a failed run, the next scheduled check waits until `Minimum-Untrained-Images` more images are added, so the same images aren't retrained every 12 hours. You can start a run yourself at any time.
+
+## Changing the training images
+
+The S3 folders are the source of truth. Every training run rebuilds the Custom Labels datasets from them, so:
+
+- To remove an image from training, delete it from its folder.
+- To relabel an image, move it to another label's folder.
+- To add a label, create a folder for it and add images. Also add the label to `Human-Review-Labels`, so reviewers can choose it.
+
+Edits that you make to the datasets in the Custom Labels console are replaced on the next training run.
+
+Next: [Detection](../4-Custom-Labels-Detection/)
