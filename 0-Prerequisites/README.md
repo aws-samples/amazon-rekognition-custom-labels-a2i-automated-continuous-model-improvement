@@ -1,24 +1,51 @@
-## 0 Prerequsites
+# 0. Prerequisites
 
-**Supprted Regions (June 2021)**  
-[Amazon Rekognition Custom Labels](https://aws.amazon.com/rekognition/custom-labels-features/) is available in US East (N. Virginia), US East (Ohio), US West (Oregon), Europe (Ireland), Europe (Ireland), Europe (London), Europe (Frankfurt), Asia Pacific (Mumbai), Asia Pacific (Singapore), Asia Pacific (Sydney), Asia Pacific (Tokyo), Asia Pacific (Seoul). [Latest](https://docs.aws.amazon.com/general/latest/gr/rekognition.html).
+## AWS account and Region
 
-- Have an AWS account with [AWS Identity and Access Management](https://aws.amazon.com/iam/) (IAM) permissions to launch the provided [AWS CloudFormation](https://aws.amazon.com/cloudformation/) template.
-- Decide on one of the Rekognition Custom Labels supported Regions in which to deploy this solution.
-- As part of the CloudFormation deployment process, you can optionally deploy an [Amazon SageMaker Ground Truth](https://aws.amazon.com/sagemaker/groundtruth/) private workforce with an associated [Amazon Cognito](https:///aws.amazon.com/cognito/) user pool. Because you can only have one private workforce per Region, you can’t deploy over an existing private workforce. To verify whether you have a private workforce already, go to the **Labeling workforces** page on the Amazon SageMaker console, choose the Region that you want use, and choose the **Private tab**. You should see three possible setups:
+- An AWS account, and permissions to deploy an AWS CDK app. The deployment creates IAM roles, so it needs administrator access or an equivalent set of permissions.
+- One of the 11 Regions where [Rekognition Custom Labels is available](https://docs.aws.amazon.com/general/latest/gr/rekognition.html#rekognition_region):
 
-  - **No Private workforce** - In this setup, SageMaker deploys a private workforce and a private team for you. When you’re prompted to enter a value for A2IPrivateTeamName in the CloudFormation template, leave it blank.
-  ![No Private Workforce Image](no-private-workforce.png)
+  | Region | Code |
+  |---|---|
+  | US East (N. Virginia) | `us-east-1` |
+  | US East (Ohio) | `us-east-2` |
+  | US West (Oregon) | `us-west-2` |
+  | Europe (Ireland) | `eu-west-1` |
+  | Europe (London) | `eu-west-2` |
+  | Europe (Frankfurt) | `eu-central-1` |
+  | Asia Pacific (Mumbai) | `ap-south-1` |
+  | Asia Pacific (Singapore) | `ap-southeast-1` |
+  | Asia Pacific (Sydney) | `ap-southeast-2` |
+  | Asia Pacific (Tokyo) | `ap-northeast-1` |
+  | Asia Pacific (Seoul) | `ap-northeast-2` |
 
-  - **Private workforce without private teams** – In this setup, you need to create a private team first. Choose **Create private team** and follow the instructions to create a team. When you’re prompted to enter a value for A2IPrivateTeamName in the CloudFormation template, enter your newly created private team name.
-  ![Private Workforce Without Team Image](private-workforce-without-teams.png)
+- Room for two running Custom Labels models. An account can run 2 models at a time by default. When a new model replaces the running one, both run for a few minutes, because the workflow stops the old model only after the new one is running. Check the [Custom Labels quotas](https://docs.aws.amazon.com/general/latest/gr/rekognition.html#limits_rekognition) if other models run in the same account.
+- An email address for notifications. The first reviewer account uses the same address.
 
-  - **Private workforce with private teams** – In this setup, you can use your existing private team or create a new one. We recommend that you create a new private team. When you’re prompted to enter a value for A2IPrivateTeamName in the CloudFormation template, enter your private team name.
-  ![Private Workforce With Team Image](private-workforce-with-teams.png)
+## Tools on your computer
 
+Deploy from your own computer. AWS CloudShell isn't supported, because its Python is version 3.9, and the CDK library that this sample uses needs Python 3.10 or later.
 
-- You need to initialize Rekognition Custom Labels for your selected Region before you can use Rekognition Custom Labels. On the Rekognition Custom Labels console, choose **Projects** in the navigation pane and take one of the following actions:
- - If you see the **Projects** page with or without projects, then your Region is initialized.
- - If you’re prompted with a message for first-time setup, follow the instructions to create the default [Amazon Simple Storage Service](https://aws.amazon.com/s3) (Amazon S3) bucket. We don’t use the default S3 bucket with this solution, but it’s part of the Rekognition Custom Labels initialization process.
+| Tool | Version | Check with |
+|---|---|---|
+| [Python](https://www.python.org/downloads/) | 3.11 or later | `python3 --version` |
+| [Node.js](https://nodejs.org/) | 22 or later, which the [AWS CDK requires](https://docs.aws.amazon.com/cdk/v2/guide/prerequisites.html) | `node --version` |
+| [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) | Version 2 | `aws --version` |
+| [Git](https://git-scm.com/downloads) | Any recent version | `git --version` |
 
-Next Step: [Deployment](../1-Deployment/)
+You don't need to install the CDK CLI globally. The sample pins its version in `package.json`, and you run it with `npx cdk`.
+
+Configure the AWS CLI with credentials for your account, and set your Region. For example, to use US West (Oregon):
+
+```bash
+aws configure set region us-west-2
+aws sts get-caller-identity
+```
+
+The second command shows the account that you're signed in to. Use the same account and Region for every step.
+
+## Rekognition Custom Labels console
+
+You don't have to open the Custom Labels console for this sample, because the workflows call the Custom Labels APIs directly. If you open the console in a new Region, it offers to create a console bucket. You can create it or skip it. The sample doesn't use it.
+
+Next: [Deployment](../1-Deployment/)

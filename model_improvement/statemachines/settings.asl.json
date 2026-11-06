@@ -1,0 +1,81 @@
+{
+  "Comment": "Applies the Enable-Automatic-Training and Automatic-Training-Poll-Frequency parameters to the training schedule.",
+  "QueryLanguage": "JSONata",
+  "StartAt": "Read settings",
+  "States": {
+    "Read settings": {
+      "Type": "Task",
+      "Comment": "Reads both settings every time, so the schedule always matches both of them (F3).",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:getParameters",
+      "Arguments": {
+        "Names": [
+          "${ParameterPrefix}/Enable-Automatic-Training",
+          "${ParameterPrefix}/Automatic-Training-Poll-Frequency"
+        ]
+      },
+      "Assign": {
+        "settings": "{% ( $p := $states.result.Parameters; $v := function($n) { $p[Name = '${ParameterPrefix}/' & $n].Value }; $minutes := $number($v('Automatic-Training-Poll-Frequency')); { 'enabled': $lowercase($v('Enable-Automatic-Training')) = 'true', 'minutes': $minutes, 'expression': 'rate(' & $string($minutes) & ($minutes = 1 ? ' minute)' : ' minutes)') } ) %}",
+        "changedParameter": "{% $exists($states.input.detail.name) ? $states.input.detail.name : 'none' %}",
+        "failure": null
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Read schedule"
+    },
+    "Read schedule": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:scheduler:getSchedule",
+      "Arguments": {
+        "Name": "${ScheduleName}",
+        "GroupName": "${ScheduleGroupName}"
+      },
+      "Assign": {
+        "schedule": "{% $states.result %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Update schedule"
+    },
+    "Update schedule": {
+      "Type": "Task",
+      "Comment": "UpdateSchedule replaces the whole schedule and resets any field it isn't given, so this sends the fields from GetSchedule with the new rate and state (O1).",
+      "Resource": "arn:aws:states:::aws-sdk:scheduler:updateSchedule",
+      "Arguments": "{% $merge([$sift($schedule, function($v, $k) { $k in ['Name', 'GroupName', 'Description', 'FlexibleTimeWindow', 'Target', 'ScheduleExpressionTimezone', 'KmsKeyArn', 'ActionAfterCompletion'] }), { 'ScheduleExpression': $settings.expression, 'State': $settings.enabled ? 'ENABLED' : 'DISABLED' }]) %}",
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Notify settings applied"
+    },
+    "Notify settings applied": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Arguments": {
+        "TopicArn": "${TopicArn}",
+        "Subject": "{% $substring('[${StackName}] Training schedule updated', 0, 100) %}",
+        "Message": "{% ($settings.enabled ? 'Automatic training is on. The training workflow checks for new images every ' & ($settings.minutes = 1 ? 'minute' : $string($settings.minutes) & ' minutes') & '.' : 'Automatic training is off. Scheduled checks are paused until Enable-Automatic-Training is set to true. You can still start a training run by hand.') & '\n\nChanged parameter: ' & $changedParameter %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "Assign": { "failure": "{% $states.errorOutput %}" }, "Next": "Notify failure" }],
+      "Next": "Done"
+    },
+    "Done": {
+      "Type": "Succeed",
+      "Output": "{% { 'automaticTraining': $settings.enabled, 'scheduleExpression': $settings.expression, 'changedParameter': $changedParameter } %}"
+    },
+    "Notify failure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Arguments": {
+        "TopicArn": "${TopicArn}",
+        "Subject": "{% $substring('[${StackName}] Training schedule update failed', 0, 100) %}",
+        "Message": "{% ( $region := $split($states.context.Execution.Id, ':')[3]; 'The training schedule was not updated after a settings change, so it may not match the parameters in Parameter Store.\n\nError: ' & $failure.Error & '\nCause: ' & ($exists($failure.Cause) ? $failure.Cause : 'none') & '\n\nRun details: https://' & $region & '.console.aws.amazon.com/states/home?region=' & $region & '#/v2/executions/details/' & $states.context.Execution.Id ) %}"
+      },
+      "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 3, "MaxAttempts": 3, "BackoffRate": 2, "JitterStrategy": "FULL" }],
+      "Next": "Failed"
+    },
+    "Failed": {
+      "Type": "Fail",
+      "Error": "{% $failure.Error %}",
+      "Cause": "{% $exists($failure.Cause) ? $failure.Cause : 'none' %}"
+    }
+  }
+}

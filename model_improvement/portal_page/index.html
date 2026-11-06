@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Image review</title>
+  <link rel="stylesheet" href="app.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>Image review</h1>
+    <div id="account" hidden>
+      <span id="user-name"></span>
+      <button type="button" id="sign-out" class="secondary">Sign out</button>
+    </div>
+  </header>
+
+  <main>
+    <p id="status" role="status" aria-live="polite"></p>
+
+    <section id="signed-out" hidden>
+      <p>Sign in to label images that the model wasn't sure about.</p>
+      <button type="button" id="sign-in">Sign in</button>
+    </section>
+
+    <section id="idle" hidden>
+      <p id="idle-message">Choose Start reviewing to get the next image.</p>
+      <button type="button" id="start">Start reviewing</button>
+    </section>
+
+    <section id="task" hidden>
+      <h2>Which label fits this image?</h2>
+      <figure>
+        <img id="image" alt="Image to label">
+      </figure>
+      <div id="labels" class="labels"></div>
+      <p class="details">
+        <span id="claim-time"></span>
+        <span id="waiting"></span>
+      </p>
+      <button type="button" id="release" class="secondary">Give this image back</button>
+    </section>
+  </main>
+</body>
+</html>

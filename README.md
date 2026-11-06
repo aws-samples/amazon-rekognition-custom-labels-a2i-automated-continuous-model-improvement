@@ -1,72 +1,123 @@
-## Automate continuous model improvement with Amazon Rekognition Custom Labels and Amazon A2I
+# Automate continuous model improvement with Amazon Rekognition Custom Labels and human review
 
-In this sample we explain how to implement an automated [Amazon Rekognition Custom Labels](https://aws.amazon.com/rekognition/custom-labels-features/) and [Amazon Augmented AI](https://aws.amazon.com/augmented-ai/) (Amazon A2I) ML workflow that can provide continuous model improvement without requiring ML expertise.
+This sample builds an image classification workflow that improves its model as it's used, without machine learning expertise. It trains an [Amazon Rekognition Custom Labels](https://aws.amazon.com/rekognition/custom-labels-features/) model from labeled images, runs detection on new images, and sends the detections that the model isn't sure about to people for review. Reviewed images become new training data, and the workflow retrains and replaces the model when enough new images are available.
 
-With Rekognition Custom Labels, you can easily build and deploy ML models to identify custom objects that are specific to your business domain. Because Rekognition Custom Labels is built off [Amazon Rekognition](https://aws.amazon.com/rekognition/) trained models, you only need to use a small set of training images to build your custom model, without requiring any ML knowledge. When combined with Amazon A2I, you can quickly integrate a human review process into your ML workflow to capture and label images for model training. Amazon A2I provides the capability to integrate your own, contracted, or readily accessible [Amazon Mechanical Turk](https://www.mturk.com/) workforce to provide the human label review. With [AWS Step Functions](https://aws.amazon.com/step-functions/), you can create and run a series of checkpoints and event-driven processes to orchestrate the entire ML workflow with minimal upfront development. By incorporating [AWS Systems Manager Parameter Store](https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-parameter-store.html), you can use parameters as variables for Step Functions checkpoints to customize the behaviors of the ML workflow as needed.
+[AWS Step Functions](https://aws.amazon.com/step-functions/) runs every step with direct service integrations. The settings live in [AWS Systems Manager Parameter Store](https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-parameter-store.html), so an operator can change the workflow's behavior without changing code. Reviewers use a small review portal that the stack deploys.
 
-### Solution overview
-The objective of this ML workflow is to continuously improve the accuracy of the model based on inference performance and human sampling. Specific to this Rekognition Custom Labels use case, inference images with a confidence level below the acceptance criteria need to be captured and labeled by a human workforce with Amazon A2I for new model training. The same Amazon A2I human workforce is utilized to label sampled inference results regardless of confidence level for business assurance. The following diagram illustrates this ML workflow.
+> **Earlier version.** The first version of this sample used Amazon Augmented AI (Amazon A2I) and Amazon SageMaker AI Ground Truth for human review, and a CloudFormation template. Both services stopped accepting new customers on July 30, 2026. This version replaces them with its own review portal and deploys with the AWS CDK. The A2I version is still available at the [`v1-a2i` tag](https://github.com/aws-samples/amazon-rekognition-custom-labels-a2i-automated-continuous-model-improvement/tree/v1-a2i). A stack deployed from that version can't be upgraded in place. Delete it, and then deploy this version as a new stack.
 
-![Automated Workflow](./assets/automated_workflow.png)
+## How it works
 
-We add flexibility to this ML workflow by parameterizing some of the processes, as indicated in green in the preceding diagram. Parameterizing the workflow allows a model operator to make changes to the processes without requiring development. We provide ten configurable parameters:
+The workflow is a loop. Labeled images train a model, the model labels new images, and people label the images that the model was unsure about, which adds training data for the next model.
 
-1. **Enable-Automatic-Training:** A toggle switch to enable or disable automatic model training and deployment
-2. **Automatic-Training-Poll-Frequency:** A timer to set a schedule to check for the criteria for new model training
-3. **Minimum-Untrained-Images:** The minimum number of new images added since the last successful training for new training to start
-4. **Minimum-F1-Score:** The minimum [F1 score](https://docs.aws.amazon.com/rekognition/latest/customlabels-dg/gs-step-evaluate-model.html) for a trained model to be acceptable for deployment
-5. **Minimum-Inference-Units:** The minimum number of [inference units](https://docs.aws.amazon.com/rekognition/latest/customlabels-dg/rm-run-model.html) to use to deploy the model
-6. **Minimum-Label-Detection-Confidence:** The [minimum confidence](https://docs.aws.amazon.com/rekognition/latest/customlabels-dg/detecting-custom-labels.html) of a detection to be considered acceptable
-7. **Enable-A2I-Workflow:** A toggle switch to enable or disable the Amazon A2I human labeling process
-8. **Enable-Automatic-Human-Sampling:** A toggle switch to enable or disable the human sampling workflow
-9. **Automatic-Human-Sampling-Frequency:** A timer to set a schedule to check for the criteria for new human sampling
-10. **Human-Sampling-Interval:** The minimum number of new inferences added since the last human sample
+```mermaid
+flowchart LR
+    labeled["Labeled images<br/>(one folder per label)"] --> train["Training workflow:<br/>train, evaluate, and start the model"]
+    train --> model["Running model"]
+    upload["New images"] --> detect["Detection workflow"]
+    model --> detect
+    detect -->|"Confidence below the minimum"| review["Human review"]
+    detect -->|"Every Nth detection"| sample["Human sampling"]
+    review -->|"Reviewer's label"| labeled
+    sample -->|"Recorded for accuracy checks"| log["Inference log"]
+    detect --> log
+```
 
-We use Step Functions to deploy the following state machine for the orchestration of the workflow.
+- **Training.** You add labeled images to S3, one folder per label. On a schedule, the training workflow checks whether enough new images were added. If so, it rebuilds the Custom Labels datasets from the folders, trains a model, and starts the model if its F1 score is high enough. Then it stops the model that the new one replaces.
+- **Detection.** When an image is added to the detection folder, the detection workflow asks the running model for the image's top label, logs the result in Amazon DynamoDB, and emails you if the confidence is below the minimum.
+- **Human review.** A low-confidence detection becomes a review task. A reviewer signs in to the review portal and chooses the right label. The workflow copies the image into that label's training folder, so the next model learns from it.
+- **Human sampling.** Every Nth detection, 1,000 by default, also goes to review, whatever its confidence. These labels are recorded next to the model's label, so you can measure the model's accuracy. Sampled images aren't added to the training data.
 
-![State Machine](./assets/state_machine.png)
+## Architecture
 
-The state machine is event-driven and divided into four separate states:
+```mermaid
+flowchart TB
+    operator(["Operator"])
+    reviewer(["Reviewer"])
+    bucket[("S3 bucket<br/>training and detection images")]
+    settings["Parameter Store<br/>settings"]
+    portal["Review portal<br/>CloudFront, Cognito,<br/>API Gateway, and Lambda"]
 
-1. The Parameter Store state is invoked by an [Amazon EventBridge](https://aws.amazon.com/eventbridge/) event pattern rule triggered by changes to certain parameters. When the model operator updates a parameter, the state machine invokes an [AWS Lambda](https://aws.amazon.com/lambda/) function to apply the changes to the impacted resources. For example, when the model operator updates the parameter Enable-Automatic-Training value to false, the state machine invokes a Lambda function to disable the automatic model training process.
+    subgraph workflows["Step Functions workflows"]
+        direction LR
+        settingsflow["Settings"]
+        training["Training"]
+        detection["Detection"]
+        review["Review"]
+    end
 
-2. The Rekognition Model state is invoked by an EventBridge schedule rule on a polling schedule set by the model operator as a parameter. The state machine first evaluates whether new model training criteria, set by the model operator as a parameter, has been met before initiating training. When the training is complete, the state machine evaluates the F1 score of the new model against the acceptance criteria for model deployment. If the F1 score meets the acceptance criteria, the state machine initiates a blue-green deployment process. The blue-green deployment process includes starting the new model, updating the new model inference endpoint, and stopping the previous running model.
+    schedule["EventBridge Scheduler"]
+    rekognition["Rekognition Custom Labels<br/>project and models"]
+    tables[("DynamoDB<br/>inference log and state")]
 
-3. The Rekognition Detection state is invoked by an [Amazon Simple Storage Service](https://aws.amazon.com/s3/) (Amazon S3) PutObject event. When the model consumer uploads images to Amazon S3, a PutObject event invokes a Lambda function to redirect the required action to the state machine. The state machine invokes another Lambda function to perform the custom label detection. Next, the state machine evaluates the inference confidence against the confidence level set by the model operator as a parameter. The state machine initiates an Amazon A2I human review workflow if the inference confidence is below the criteria, provided that the Amazon A2I workflow is enabled.
+    operator -->|"Upload images"| bucket
+    operator -->|"Change settings"| settings
+    reviewer -->|"Sign in and label images"| portal
+    settings -->|"Schedule changed"| settingsflow
+    settingsflow -->|"Update"| schedule
+    schedule -->|"Every 12 hours"| training
+    bucket -->|"New image"| detection
+    detection -->|"Low confidence or sampled"| review
+    portal -->|"Labels"| review
+    review -->|"Copy labeled image"| bucket
+    training --> rekognition
+    detection --> rekognition
+    detection --> tables
+    review --> tables
+```
 
-4. The A2I Human Loop Data state is invoked by an S3 PutObject event. When the Amazon A2I human review workflow is complete, the output is stored in Amazon S3 by Amazon A2I by default. An S3 PutObject event invokes a Lambda function to redirect the required action to the state machine. The state machine invokes another Lambda function to evaluate the human loop response and place a copy of the initial image into an S3 folder corresponding to the evaluated label. This is the process in which new human-labeled images are added to the training dataset.
+The diagram leaves out two things: every workflow emails the operator through Amazon SNS, and a fifth workflow stops the running models when you delete the stack. EventBridge rules connect the S3 bucket and Parameter Store to the workflows.
 
-5. The Human Sampling state is invoked by an EventBridge schedule rule on a polling schedule set by the model operator as a parameter. The state machine invokes a Lambda function to first query the image inference log to find the last human sampled inference and then search for the next qualified inference to be sampled based on the sampling interval as set by the model operator. If qualified, that inference is marked as "sampled" and a human review workflow is created. The process repeats again until all qualified inferences are marked for human sampling in the same invocation.
+The stack has five state machines:
 
-### Architecture overview
-This solution is built on AWS [serverless](https://aws.amazon.com/serverless/) architecture. The architecture is shown in the following diagram.
+- **Training** checks for enough new images, builds a manifest from the label folders, rebuilds the training and test datasets, trains a model, and checks its F1 score. If the score is high enough, it starts the new model and stops the old one. EventBridge Scheduler starts it every 12 hours by default, and you can also start it yourself.
+- **Detection** runs for each image added to `images_for_detection/`. It detects the top label, logs the result, starts a review for a low-confidence or sampled detection, and emails low-confidence detections.
+- **Review** adds a review task to the detection's log item and waits for a reviewer's label, for up to 72 hours by default. When the label arrives, it saves it, and for a low-confidence image it copies the image into the label's training folder.
+- **Settings** applies changes to the two training schedule settings to the EventBridge Scheduler schedule.
+- **Cleanup** stops the project's running models when you delete the stack.
 
-![Architecture](./assets/architecture.png)  
+The review portal is a page in a private S3 bucket, served through Amazon CloudFront. Reviewers sign in with Amazon Cognito. CloudFront sends the page's `/api/*` requests to an Amazon API Gateway HTTP API, which checks the reviewer's sign-in token and calls the review API, the sample's only Lambda function. The function claims tasks for reviewers and sends their labels to the waiting review workflow.
 
-We use Rekognition Custom Labels as the core ML service. A Recognition Custom Labels project is created as part the initial [AWS CloudFormation](https://aws.amazon.com/cloudformation/) deployment process. Creating, starting, and stopping project versions are performed automatically as orchestrated by the state machine backed by Lambda.
+## Costs
 
-We use Amazon A2I to provide a human labeling workflow to label captured images during the inference process. A flow definition is created as part of the CloudFormation stack. An Amazon A2I human labeling task is generated by Lambda as part of the custom label detection process.
+The running model is the main cost. Rekognition Custom Labels charges [$4 per inference hour](https://aws.amazon.com/rekognition/pricing/) for each inference unit while a model runs, whether or not it processes images. With one inference unit, that's about $96 a day. Training costs $1 per training hour, and a model trained on the sample images takes about 10 minutes of billed training.
 
-We optionally deploy an [Amazon SageMaker Ground Truth](https://aws.amazon.com/sagemaker/groundtruth/) private workforce and team, if none existed, as part of the CloudFormation stack. The human flow definition has a dependency for the Ground Truth private team to function.
+Stop the model when you're not using it. Section 7 shows how. The other services are billed per use and cost little at sample scale: Step Functions, DynamoDB on-demand tables, Lambda, API Gateway, CloudFront, S3, SNS, EventBridge Scheduler, and Amazon Cognito (free for the first 10,000 monthly active users on the Essentials plan).
 
-We optionally deploy an [Amazon Cognito](https://aws.amazon.com/cognito/) user pool and app client, if none existed, as part of the CloudFormation stack. The Ground Truth private workforce has a dependency for the user pool and app client to function.
+## Walkthrough
 
-We use Parameter Store in two different ways. Firstly, we provide a set of seven single-value parameters for the model operator to use to configure the ML workflow. Secondly, we provide a JSON-based parameter for the system to use to store environmental variables and operational data.
+1. [Prerequisites](./0-Prerequisites/)
+2. [Deployment](./1-Deployment/)
+3. [Settings](./2-Parameter-Store/)
+4. [Model training](./3-Model-Training/)
+5. [Detection](./4-Custom-Labels-Detection/)
+6. [Human review](./5-Human-Review/)
+7. [Human sampling](./6-Human-Sampling/)
+8. [Cleanup](./7-Conclusions-Cleanup/)
 
-We use two EventBridge rules to initiate Step Functions state machine runs. The first rule is based on a Systems Manager event pattern. The Systems Manager rule is triggered by changes to the Parameter Store and initiates the state machine to invoke a Lambda function to apply changes to the impacted resources. The second rule is a schedule rule. The schedule rule is triggered periodically to initiate the state machine to invoke a Lambda function to check for new model training.
+## Security
 
-We use an [Amazon DynamoDB](https://aws.amazon.com/dynamodb/) NoSQL database to log all Rekognition and A2I events and results for performance analysis and model drift detection. Although we did NOT include an analytics feature in this example, you can use [AWS Glue](https://aws.amazon.com/glue) and [Amazon Athena](https://aws.amazon.com/athena) to run interactive ad hoc SQL queries against the inference logs. With [Amazon QuickSight](https://aws.amazon.com/quicksight/), you can create real-time analytics dashboard to visualize the inference logs.
+- Only users that an administrator adds can sign in, and only members of the `reviewers` group can review. API Gateway rejects API requests without a valid sign-in token before the function runs.
+- Images stay in private buckets. The review page gets a presigned link for each image, which expires after 5 minutes. Reviewers don't see the model's label or confidence.
+- The review page uses no third-party code. CloudFront adds a strict Content-Security-Policy and other security headers.
+- Each workflow and the function have their own IAM role with only the permissions they need.
+- The stack doesn't include AWS WAF. To add it, attach a web ACL to the CloudFront distribution (created in us-east-1) and to the Cognito user pool.
 
-We use a Step Functions state machine to orchestrate the ML workflow. The state machine initiates different processes based on events received from EventBridge and responses from Lambda. In addition, the state machine uses an internal process such as Wait to wait for model training and deployment to complete and Choice to evaluate for next tasks.
+This is a sample. Review the code and the settings against your own security and compliance requirements before you use it in production. See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for how to report a security issue.
 
-We use an S3 bucket and a set of predefined folders to store training and inference images and model artifacts. Each folder has a dedicated purpose. The model operator uploads new images to the folder images_labeled_by_folder for training, and the model consumer uploads inference images to the folder images_for_detection for custom label detection.
+## Repository layout
 
-We use three different sets of Lambda functions:
+| Path | Contents |
+|---|---|
+| `app.py`, `cdk.json`, `requirements.txt`, `package.json` | The CDK app, its pinned Python packages, and the pinned CDK CLI |
+| `model_improvement/stack.py` | The stack: storage, settings, workflows, triggers, and permissions |
+| `model_improvement/statemachines/` | The five state machine definitions, in Amazon States Language with JSONata |
+| `model_improvement/review_api/` | The review API function |
+| `model_improvement/portal.py`, `model_improvement/portal_page/` | The review portal and its page |
+| `sample-images/` | Training images for two labels, and images for detection |
 
-- The first set consists of two Lambda functions that build the Rekognition Custom Labels project and Amazon A2I human flow definition. These two Lambda functions are only used initially as part of the CloudFormation stack deployment process.
-- The second set of Lambda functions are invoked by the state machine to run Amazon Rekognition, A2I & DynamoDB APIs, create a manifest file for training, collect labeled images for training, create human sampling, and manage system resources.
-- The last set is a single Lambda function to redirect S3 PutObject events to the state machine.
+## License
 
-We use [Amazon Simple Notification Service](https://aws.amazon.com/sns/) (Amazon SNS) as a communication mechanism to alert the model operator and model consumer of relevant model training and detection events. All SNS messages are published by the corresponding Lambda functions.
+The documentation is available under the Creative Commons Attribution-ShareAlike 4.0 International License. See the [LICENSE](LICENSE) file. The sample code is available under the MIT-0 license. See the [LICENSE-SAMPLECODE](LICENSE-SAMPLECODE) file.
 
-Next Step: [0-Prerequisites](./0-Prerequisites/)
+Next: [Prerequisites](./0-Prerequisites/)

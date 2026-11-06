@@ -1,1 +1,12 @@
 .DS_Store
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Node.js (the pinned CDK CLI)
+node_modules/
+
+# CDK output
+cdk.out/

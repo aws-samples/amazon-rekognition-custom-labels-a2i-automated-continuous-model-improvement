@@ -1,28 +1,44 @@
-## 6 Automatic human sampling
+# 6. Human sampling
 
-In this section, we explain the design principle and the processes behind the human sampling workflow.
+Low-confidence reviews only show you the detections that the model was unsure about. A confident model can still be wrong, so human sampling also sends every Nth detection to review, whatever its confidence. Comparing the reviewers' labels with the model's labels shows how accurate the model is.
 
-**Design principle**  
-The principle for human sampling is intended for business improvement. In human sampling, every `nth` detection is flagged for human review and the human-labeled result is compared against the detected one, regardless of the original detection confidence level. The sampled detections can then be used for qualify control, audit, analytics, **manual** model drift detection, etc. Inference images flagged as `sampled only` are **not** added to the training dataset.
+## How sampling works
 
-**Workflow**  
-The human sampling workflow is configurable by three [Amazon Parameter Store](https://console.aws.amazon.com/systems-manager/parameters) parameters as explained in [Section 2-Parameter Store](../2-Parameter-Store/). When **Enable-Automatic-Human-Sampling** is enabled, an [Amazon EventBridge](https://aws.amazon.com/eventbridge/) schedule rule is triggered every `nth` minutes as set in **Automatic-Human-Sampling-Frequency** to invoke the processes orchestrated by [AWS Step Functions](https://aws.amazon.com/step-functions/). The processes include:
+The detection workflow numbers every detection with a counter. When `Enable-Automatic-Human-Sampling` is `true`, every detection whose number is a multiple of `Human-Sampling-Interval` is sampled. With the default of 1,000, that's detections 1,000, 2,000, 3,000, and so on.
 
-1. Initialize the starting `query date` with the `Last modified date` of **Enable-Automatic-Human-Sampling**. The purpose is to sample forward instead of retroactively finding historic samples.
-2. Query the minimum number (`limit`) of detection events as set in **Human-Sampling-Interval** forward from the `query date`
-3. If the query result count is less than the minimum number, then the process ends. Otherwise, the last (`limit`) detection event is marked as sampled.
-4. Next an A2I human labeling task is created if none exists from another process and the originating source is marked as `Human Sampling`.
-5. Steps 2 through 4 are repeated with `query date` set to the current sampled detection date.
+- A sampled detection gets a sampling review, which reviewers label in the review portal like any other task ([section 5](../5-Human-Review/)). The portal doesn't tell them whether a task is a sample.
+- A sampled image isn't added to the training images, whatever the reviewer chooses.
+- A detection that's both sampled and low confidence gets one low-confidence review, so its image can be added to the training images. The inference log still records it as sampled.
+- The detection log records `HumanSampled` for every detection, `true` or `false`.
 
-Finally the labeling task is completed as explained in [Section 5-A2I Human Loop](../5-A2I-Human-Loop/).
+## Try it with a short interval
 
+To see sampling without uploading 1,000 images, set the interval to 2, so every second detection is sampled:
 
+```bash
+aws ssm put-parameter --name "/$STACK/Human-Sampling-Interval" --value 2 --overwrite
+for i in 1 2; do
+  aws s3 cp sample-images/aws_logo/aws-2.jpg "s3://$BUCKET/images_for_detection/sampling-test-$i.jpg"
+done
+```
 
+One of the two detections gets a sampling review. Label it in the review portal, and then set the interval back:
 
+```bash
+aws ssm put-parameter --name "/$STACK/Human-Sampling-Interval" --value 1000 --overwrite
+```
 
+## Measure the model's accuracy
 
+Each finished review records the reviewer's answer in `HumanLabel`, and whether it matches the model's label in `HumanLabelMatchesModel`. This command lists the finished sampling reviews:
 
+```bash
+aws dynamodb scan --table-name "$LOG_TABLE" \
+  --filter-expression "ReviewSource = :sampling AND ReviewStatus = :completed" \
+  --expression-attribute-values '{":sampling": {"S": "HumanSampling"}, ":completed": {"S": "COMPLETED"}}' \
+  --query "Items[].[S3ObjectKey.S, DetectedLabel.S, HumanLabel.S, HumanLabelMatchesModel.BOOL]" --output text
+```
 
+The share of `True` values in the last column estimates the model's accuracy. A falling share is a sign that the images you're checking have changed, and that the model needs new training images.
 
-
-Next Step: [7-Conclusions-Cleanup](../7-Conclusions-Cleanup/)
+Next: [Cleanup](../7-Conclusions-Cleanup/)

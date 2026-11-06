@@ -1,0 +1,9 @@
+{
+  "name": "rekognition-custom-labels-continuous-model-improvement",
+  "private": true,
+  "description": "Pins the AWS CDK CLI version for this app. Run the CLI with npx cdk.",
+  "license": "MIT-0",
+  "devDependencies": {
+    "aws-cdk": "2.1147.0"
+  }
+}
