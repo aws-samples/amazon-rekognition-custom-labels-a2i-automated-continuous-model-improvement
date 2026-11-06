@@ -21,7 +21,8 @@ This file tracks the work to bring the sample up to date. The work started with 
 | D12: AWS WAF | Decided November 5, 2026: not built. The docs can explain how to add it. |
 | Human review design | Approved November 4, 2026 |
 | Trial T1 | Done November 4, 2026. All seven checks passed, and the trial resources are deleted. |
-| Build (H0 to H4) | H0 done November 4, 2026. H1 to H4 done and squash-merged into the local `v2` branch November 5, 2026, and `v2` merged into the local `main` branch. Nothing is pushed. |
+| Build (H0 to H4) | H0 done November 4, 2026. H1 to H4 done and squash-merged into the local `v2` branch November 5, 2026, and `v2` merged into the local `main` branch and tagged `v2.0`. Nothing is pushed. |
+| Test deployments | Deleted November 5, 2026: the H1 to H3 test stack, the H4 docs-test stack, and the resources that they keep. |
 | Optional modernization | O1 and O4 adopted for H1, November 4, 2026. The other open items aren't decided. |
 
 ## Why the sample needs a redesign
@@ -690,6 +691,7 @@ Decide each item separately.
 | 2026-11-05 | The owner's browser walkthrough passed: sign-in with the invitation, a password change, and two reviews labeled None of the above. Decided D12 (don't build AWS WAF) and updated the design. Added the rule that phase branches are deleted after their squash-merge, and deleted `v2-h2`. Squash-merged H3 into `v2`, deleted `v2-h3`, and started H4 on `v2-h4`. |
 | 2026-11-05 | Wrote H4 on `v2-h4`: the README and sections 0 to 7 for the CDK version, with Mermaid diagrams instead of `assets/`, and section 5 renamed to `5-Human-Review`. Removed the v1 screenshots, diagrams, state machine definition, and sample image zip. Recorded the owner's H4 decisions. |
 | 2026-11-05 | Tested the docs on a fresh stack, `CustomLabelsDocsTest`, from deployment to cleanup, and fixed the docs where the test differed (see H4). The test also found that `cdk destroy` left the custom resource log group behind. Gave both Lambda functions roles without `logs:CreateLogGroup`, and a second deployment and deletion left no log groups. The test cost about $2.20 at most, and no test resources are left. Marked H4, R2, R3, F3, F4, F7, F8, and the open DOC items done. Squash-merged H4 into `v2`, deleted `v2-h4`, and merged `v2` into the local `main` branch. Nothing is pushed. |
+| 2026-11-05 | Deleted the H1 to H3 test stack, `CustomLabelsModelImprovement`. First updated it to the new Lambda roles, then ran `cdk destroy`, which took 3.5 minutes, and deleted its two stopped models, its datasets and project, the inference log table, and the bucket with the section 7 commands. The user pool went with the stack, including the owner's reviewer account. No log groups or other test resources are left. Merged this entry into `main` and tagged that merge commit `v2.0`, locally. Nothing is pushed. |
 
 ## Sources
 
