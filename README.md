@@ -1,10 +1,12 @@
 # Automate continuous model improvement with Amazon Rekognition Custom Labels and human review
 
+> **Update, November 2026:** Amazon Augmented AI (Amazon A2I) and Amazon SageMaker AI Ground Truth are [no longer open to new customers](https://docs.aws.amazon.com/general/latest/gr/maintenance_services.html) as of July 30, 2026. Customers who already use them can keep using them. The first version of this sample used both services for human review. This version replaces them with its own review portal, and it deploys with the AWS CDK instead of a CloudFormation template.
+>
+> The first version is still available at the [`v1-a2i` tag](https://github.com/aws-samples/amazon-rekognition-custom-labels-a2i-automated-continuous-model-improvement/tree/v1-a2i), for accounts that can still use A2I and Ground Truth. In an existing clone, run `git fetch --tags` and then `git checkout v1-a2i`. A stack deployed from the first version can't be upgraded in place. To move to this version, delete the old stack, and then deploy this version as a new stack.
+
 This sample builds an image classification workflow that improves its model as it's used, without machine learning expertise. It trains an [Amazon Rekognition Custom Labels](https://aws.amazon.com/rekognition/custom-labels-features/) model from labeled images, runs detection on new images, and sends the detections that the model isn't sure about to people for review. Reviewed images become new training data, and the workflow retrains and replaces the model when enough new images are available.
 
 [AWS Step Functions](https://aws.amazon.com/step-functions/) runs every step with direct service integrations. The settings live in [AWS Systems Manager Parameter Store](https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-parameter-store.html), so an operator can change the workflow's behavior without changing code. Reviewers use a small review portal that the stack deploys.
-
-> **Earlier version.** The first version of this sample used Amazon Augmented AI (Amazon A2I) and Amazon SageMaker AI Ground Truth for human review, and a CloudFormation template. Both services stopped accepting new customers on July 30, 2026. This version replaces them with its own review portal and deploys with the AWS CDK. The A2I version is still available at the [`v1-a2i` tag](https://github.com/aws-samples/amazon-rekognition-custom-labels-a2i-automated-continuous-model-improvement/tree/v1-a2i). A stack deployed from that version can't be upgraded in place. Delete it, and then deploy this version as a new stack.
 
 ## How it works
 
