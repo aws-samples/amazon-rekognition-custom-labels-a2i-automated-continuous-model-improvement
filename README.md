@@ -114,7 +114,7 @@ This is a sample. Review the code and the settings against your own security and
 | `model_improvement/statemachines/` | The five state machine definitions, in Amazon States Language with JSONata |
 | `model_improvement/review_api/` | The review API function |
 | `model_improvement/portal.py`, `model_improvement/portal_page/` | The review portal and its page |
-| `sample-images/` | Training images for two labels, and images for detection |
+| `sample-images/`, `sample-images.zip` | Training images for two labels, and images for detection. The zip has the same images. |
 
 ## License
 
